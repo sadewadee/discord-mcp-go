@@ -6,15 +6,23 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 	"slices"
 	"strings"
+	"unicode"
 )
 
-const maxBodyBytes = 64 << 10
+// Request and registration limits.
+const (
+	maxBodyBytes         = 64 << 10
+	maxRedirectURIs      = 5
+	maxRedirectURILength = 1024
+	maxClientNameRunes   = 64
+)
 
 // Client authentication methods.
 const (
@@ -49,8 +57,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		oauthError(w, http.StatusBadRequest, "invalid_redirect_uri", "redirect_uris is required")
 		return
 	}
-	if len(req.RedirectURIs) > 10 {
-		oauthError(w, http.StatusBadRequest, "invalid_redirect_uri", "at most 10 redirect_uris are allowed")
+	if len(req.RedirectURIs) > maxRedirectURIs {
+		oauthError(w, http.StatusBadRequest, "invalid_redirect_uri", fmt.Sprintf("at most %d redirect_uris are allowed", maxRedirectURIs))
 		return
 	}
 	for _, u := range req.RedirectURIs {
@@ -83,10 +91,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	name := strings.TrimSpace(req.ClientName)
-	if len(name) > 100 {
-		name = name[:100]
-	}
+	name := cleanClientName(req.ClientName)
 
 	now := s.cfg.Now()
 	c := &Client{
@@ -102,15 +107,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		secret = randomToken()
 		c.SecretHash = hashToken(secret)
 	}
-	if err := s.store.addClient(c); err != nil {
+	if err := s.store.addClient(c, maxClients); err != nil {
+		if errors.Is(err, errStoreFull) {
+			oauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "too many registered clients")
+			return
+		}
 		s.log.Error("saving OAuth client failed", "error", err)
 		oauthError(w, http.StatusInternalServerError, "server_error", "")
 		return
-	}
-	if s.store.clientCount() > maxClients {
-		if err := s.store.pruneClients(maxClients); err != nil {
-			s.log.Error("pruning OAuth clients failed", "error", err)
-		}
 	}
 	s.log.Info("OAuth client registered", "client_id", c.ID, "name", name, "auth_method", method)
 
@@ -135,6 +139,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 // validateRedirectURI accepts https URLs, http URLs on a loopback host (for
 // native apps, RFC 8252) and private-use schemes such as cursor://.
 func validateRedirectURI(raw string) error {
+	if len(raw) > maxRedirectURILength {
+		return fmt.Errorf("redirect_uri must be at most %d characters", maxRedirectURILength)
+	}
+	// ASCII only: a look-alike Unicode host (for example a Cyrillic letter)
+	// would show on the consent page as a trusted name. Internationalized
+	// hosts can be registered in their xn-- form.
+	for i := 0; i < len(raw); i++ {
+		if raw[i] <= ' ' || raw[i] >= 0x7f {
+			return errors.New("redirect_uri must be printable ASCII without spaces")
+		}
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" {
 		return errors.New("redirect_uri must be an absolute URI")
@@ -155,6 +170,25 @@ func validateRedirectURI(raw string) error {
 		return errors.New("redirect_uri scheme is not allowed")
 	}
 	return nil
+}
+
+// cleanClientName removes control and bidirectional-formatting characters,
+// which could make the consent page show a misleading name, and limits the
+// length.
+func cleanClientName(name string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range strings.TrimSpace(name) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Bidi_Control, r) || unicode.Is(unicode.Cf, r) {
+			continue
+		}
+		if n == maxClientNameRunes {
+			break
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func isLoopbackHost(host string) bool {
@@ -287,6 +321,10 @@ func (s *Server) refresh(w http.ResponseWriter, r *http.Request, c *Client) {
 		return
 	}
 	t, err := s.store.useRefresh(value)
+	if errors.Is(err, errRefreshRetried) {
+		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token already used")
+		return
+	}
 	if errors.Is(err, errRefreshReused) {
 		s.log.Warn("refresh token reused; revoked the token family", "client_id", c.ID)
 		oauthError(w, http.StatusBadRequest, "invalid_grant", "refresh token already used")

@@ -12,6 +12,7 @@ package oauth
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -31,9 +32,8 @@ const (
 	AccessTokenTTL  = time.Hour
 	RefreshTokenTTL = 30 * 24 * time.Hour
 	codeTTL         = 5 * time.Minute
-	pendingTTL      = 10 * time.Minute
-	maxClients      = 1000
-	maxPending      = 1000
+	pendingTTL      = 10 * time.Minute // how long a sign-in may take
+	maxClients      = 500
 	// Scope is the only scope; it grants use of every tool.
 	Scope = "mcp"
 )
@@ -81,9 +81,13 @@ type Server struct {
 	store    *store
 	log      *slog.Logger
 
-	mu      sync.Mutex
-	pending map[string]*pendingAuth // by ID
-	codes   map[string]*authCode    // by code hash
+	// key signs sign-in cookies and consent tokens. It is random per
+	// process: a restart only interrupts sign-ins in progress.
+	key []byte
+
+	mu        sync.Mutex
+	codes     map[string]*authCode // by code hash
+	doneFlows map[string]time.Time // answered sign-ins, by nonce, until they expire
 }
 
 // New validates cfg and opens the data file.
@@ -113,18 +117,23 @@ func New(cfg Config) (*Server, error) {
 		cfg.Now = time.Now
 	}
 	issuer := strings.TrimRight(cfg.PublicURL, "/")
-	st, err := openStore(cfg.DataFile, cfg.Now)
+	st, err := openStore(cfg.DataFile, cfg.Now, cfg.Logger.Warn)
 	if err != nil {
 		return nil, err
 	}
+	key := make([]byte, 32)
+	if _, err := rand.Read(key); err != nil {
+		return nil, err
+	}
 	return &Server{
-		cfg:      cfg,
-		issuer:   issuer,
-		resource: issuer + "/mcp",
-		store:    st,
-		log:      cfg.Logger,
-		pending:  map[string]*pendingAuth{},
-		codes:    map[string]*authCode{},
+		cfg:       cfg,
+		issuer:    issuer,
+		resource:  issuer + "/mcp",
+		store:     st,
+		log:       cfg.Logger,
+		key:       key,
+		codes:     map[string]*authCode{},
+		doneFlows: map[string]time.Time{},
 	}, nil
 }
 

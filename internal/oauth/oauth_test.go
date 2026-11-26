@@ -4,16 +4,20 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 const (
@@ -61,12 +65,25 @@ type harness struct {
 	client  *http.Client // cookie jar, does not follow redirects
 	mu      sync.Mutex
 	allowed map[string]bool
+	clock   time.Time
+}
+
+func (h *harness) now() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.clock
+}
+
+func (h *harness) advance(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.clock = h.clock.Add(d)
 }
 
 func newHarness(t *testing.T, dataFile, staticToken string) *harness {
 	t.Helper()
 	discord := fakeDiscord(t)
-	h := &harness{t: t, allowed: map[string]bool{"111": true}}
+	h := &harness{t: t, allowed: map[string]bool{"111": true}, clock: time.Now()}
 	mux := http.NewServeMux()
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -83,6 +100,7 @@ func newHarness(t *testing.T, dataFile, staticToken string) *harness {
 		DataFile:            dataFile,
 		DiscordAuthorizeURL: "https://discord.invalid/oauth2/authorize",
 		DiscordAPIBase:      discord.URL,
+		Now:                 h.now,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -355,8 +373,18 @@ func TestRefreshRotationAndReuse(t *testing.T) {
 	if resp := h.callMCP(tok2["access_token"].(string)); resp.StatusCode != http.StatusOK {
 		t.Fatalf("new access token rejected: %d", resp.StatusCode)
 	}
-	// Replaying the old refresh token revokes the whole family.
+	// Within the grace period a second use is refused but revokes nothing
+	// (a client retrying after a network error).
 	status, m := h.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "refresh_token": {refresh1}}, "", "")
+	if status != http.StatusBadRequest || m["error"] != "invalid_grant" {
+		t.Fatalf("retry: %d %v", status, m)
+	}
+	if resp := h.callMCP(tok2["access_token"].(string)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("retry within grace revoked the family: %d", resp.StatusCode)
+	}
+	// Later, replaying the old refresh token revokes the whole family.
+	h.advance(refreshGrace + time.Second)
+	status, m = h.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "refresh_token": {refresh1}}, "", "")
 	if status != http.StatusBadRequest || m["error"] != "invalid_grant" {
 		t.Fatalf("reuse: %d %v", status, m)
 	}
@@ -400,26 +428,27 @@ func TestPKCEAndRedirectChecks(t *testing.T) {
 		t.Errorf("wrong verifier: %d %v", status, m)
 	}
 
-	// Authorization requests without PKCE are refused via the redirect.
-	resp := h.get(h.authorizeURL(clientID, url.Values{"code_challenge_method": {"plain"}}))
-	loc, _ := url.Parse(resp.Header.Get("Location"))
-	resp.Body.Close()
-	if loc.Query().Get("error") != "invalid_request" {
-		t.Errorf("plain PKCE accepted: %s", loc)
+	// Invalid authorization requests get an error page, never a redirect
+	// (which would make the server an open redirector).
+	for name, extra := range map[string]url.Values{
+		"plain PKCE":        {"code_challenge_method": {"plain"}},
+		"no PKCE":           {"code_challenge": {""}},
+		"bad response_type": {"response_type": {"token"}},
+		"foreign resource":  {"resource": {"https://other.example/mcp"}},
+		"huge state":        {"state": {strings.Repeat("s", maxStateLength+1)}},
+	} {
+		resp := h.get(h.authorizeURL(clientID, extra))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" {
+			t.Errorf("%s: %d, Location %q", name, resp.StatusCode, resp.Header.Get("Location"))
+		}
 	}
 	// An unregistered redirect URI is never redirected to.
-	resp = h.get(h.authorizeURL(clientID, url.Values{"redirect_uri": {"https://evil.example/cb"}}))
+	resp := h.get(h.authorizeURL(clientID, url.Values{"redirect_uri": {"https://evil.example/cb"}}))
 	if resp.StatusCode != http.StatusBadRequest || resp.Header.Get("Location") != "" {
 		t.Errorf("unregistered redirect: %d %s", resp.StatusCode, resp.Header.Get("Location"))
 	}
 	resp.Body.Close()
-	// Wrong resource.
-	resp = h.get(h.authorizeURL(clientID, url.Values{"resource": {"https://other.example/mcp"}}))
-	loc, _ = url.Parse(resp.Header.Get("Location"))
-	resp.Body.Close()
-	if loc.Query().Get("error") != "invalid_target" {
-		t.Errorf("foreign resource accepted: %s", loc)
-	}
 }
 
 func TestLoopbackRedirectPortMayDiffer(t *testing.T) {
@@ -603,5 +632,191 @@ func TestVerifyPKCERoundTrip(t *testing.T) {
 	}
 	if verifyPKCE(verifier, challengeFor(verifier+"x")) {
 		t.Error("mismatched verifier accepted")
+	}
+}
+
+func TestConsentPageHasNoFormAction(t *testing.T) {
+	h := newHarness(t, "", "")
+	clientID := h.publicClient()
+	resp := h.get(h.authorizeURL(clientID, nil))
+	loc, _ := url.Parse(resp.Header.Get("Location"))
+	resp.Body.Close()
+	resp = h.get(h.srv.URL + "/oauth/discord/callback?" + url.Values{"code": {"code-111"}, "state": {loc.Query().Get("state")}}.Encode())
+	defer resp.Body.Close()
+	csp := resp.Header.Get("Content-Security-Policy")
+	// Browsers apply form-action to the redirect after the form, which goes
+	// to the client's own origin or scheme.
+	if strings.Contains(csp, "form-action") || !strings.Contains(csp, "frame-ancestors 'none'") {
+		t.Errorf("CSP = %q", csp)
+	}
+}
+
+func TestConsentIsSingleUse(t *testing.T) {
+	h := newHarness(t, "", "")
+	form, _ := h.signIn(h.publicClient(), "111")
+	replay := url.Values{}
+	for k, v := range form {
+		replay[k] = v
+	}
+	if code := h.consent(form, "allow").Query().Get("code"); code == "" {
+		t.Fatal("no code")
+	}
+	replay.Set("action", "allow")
+	resp, err := h.client.PostForm(h.srv.URL+"/oauth/consent", replay)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("second consent answer accepted: %d", resp.StatusCode)
+	}
+}
+
+func TestTamperedFlowCookieRejected(t *testing.T) {
+	h := newHarness(t, "", "")
+	clientID := h.publicClient()
+	resp := h.get(h.authorizeURL(clientID, nil))
+	loc, _ := url.Parse(resp.Header.Get("Location"))
+	resp.Body.Close()
+	nonce := loc.Query().Get("state")
+	u, _ := url.Parse(h.srv.URL)
+	for _, c := range h.client.Jar.Cookies(u) {
+		if strings.HasPrefix(c.Name, "dmcp_flow_") {
+			body, sig, _ := strings.Cut(c.Value, ".")
+			c.Value = body + "x." + sig
+			h.client.Jar.SetCookies(u, []*http.Cookie{c})
+		}
+	}
+	resp = h.get(h.srv.URL + "/oauth/discord/callback?" + url.Values{"code": {"code-111"}, "state": {nonce}}.Encode())
+	page := body(resp)
+	if resp.StatusCode != http.StatusBadRequest || strings.Contains(page, `name="csrf"`) {
+		t.Errorf("tampered cookie accepted: %d", resp.StatusCode)
+	}
+}
+
+func TestSignInExpires(t *testing.T) {
+	h := newHarness(t, "", "")
+	clientID := h.publicClient()
+	resp := h.get(h.authorizeURL(clientID, nil))
+	loc, _ := url.Parse(resp.Header.Get("Location"))
+	resp.Body.Close()
+	h.advance(pendingTTL + time.Second)
+	resp = h.get(h.srv.URL + "/oauth/discord/callback?" + url.Values{"code": {"code-111"}, "state": {loc.Query().Get("state")}}.Encode())
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expired sign-in accepted: %d", resp.StatusCode)
+	}
+}
+
+func TestManyAuthorizeRequestsDoNotBlockSignIn(t *testing.T) {
+	h := newHarness(t, "", "")
+	attacker := h.publicClient()
+	anon := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for i := 0; i < 1500; i++ {
+		resp, err := anon.Get(h.authorizeURL(attacker, nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	// Sign-in state lives in the browser, so a real user is unaffected.
+	if tok := h.fullFlow(h.publicClient()); tok["access_token"] == nil {
+		t.Fatal("sign-in failed after an authorize flood")
+	}
+}
+
+func TestRegistrationFloodKeepsSignedInClients(t *testing.T) {
+	h := newHarness(t, "", "")
+	clientID := h.publicClient()
+	tok := h.fullFlow(clientID)
+	for i := 0; i < maxClients+50; i++ {
+		if status, m := h.register(`{"redirect_uris":["https://x.example/cb"],"token_endpoint_auth_method":"none"}`); status != http.StatusCreated {
+			t.Fatalf("registration %d: %d %v", i, status, m)
+		}
+	}
+	if resp := h.callMCP(tok["access_token"].(string)); resp.StatusCode != http.StatusOK {
+		t.Fatalf("signed-in client evicted by a registration flood: %d", resp.StatusCode)
+	}
+	if h.oauth.store.client(clientID) == nil {
+		t.Fatal("signed-in client removed")
+	}
+	status, m := h.token(url.Values{"grant_type": {"refresh_token"}, "client_id": {clientID}, "refresh_token": {tok["refresh_token"].(string)}}, "", "")
+	if status != http.StatusOK {
+		t.Errorf("refresh after flood: %d %v", status, m)
+	}
+}
+
+func TestStoreFullOfLiveClients(t *testing.T) {
+	st, _ := openStore("", time.Now, func(string, ...any) {})
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		c := &Client{ID: fmt.Sprint("c", i), CreatedAt: now}
+		if err := st.addClient(c, 3); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.issue(Token{Kind: kindAccess, ClientID: c.ID, ExpiresAt: now.Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := st.addClient(&Client{ID: "new", CreatedAt: now}, 3); !errors.Is(err, errStoreFull) {
+		t.Errorf("expected errStoreFull, got %v", err)
+	}
+}
+
+func TestUnusedRegistrationsExpire(t *testing.T) {
+	h := newHarness(t, "", "")
+	unused := h.publicClient()
+	used := h.publicClient()
+	h.fullFlow(used)
+	h.advance(unusedClientTTL + time.Hour)
+	h.publicClient() // triggers pruning
+	if h.oauth.store.client(unused) != nil {
+		t.Error("unused registration kept")
+	}
+	if h.oauth.store.client(used) == nil {
+		t.Error("used client removed")
+	}
+}
+
+func TestRegistrationLimitsAndNameCleaning(t *testing.T) {
+	h := newHarness(t, "", "")
+	for _, uri := range []string{
+		"https://" + strings.Repeat("a", maxRedirectURILength) + ".example/cb",
+		"https://\u0441laude.ai/cb", // Cyrillic es
+		"https://a.example/c b",
+	} {
+		if status, _ := h.register(`{"redirect_uris":["` + uri + `"],"token_endpoint_auth_method":"none"}`); status != http.StatusBadRequest {
+			t.Errorf("redirect %q accepted: %d", uri, status)
+		}
+	}
+	six := `["https://a.example/1","https://a.example/2","https://a.example/3","https://a.example/4","https://a.example/5","https://a.example/6"]`
+	if status, _ := h.register(`{"redirect_uris":` + six + `,"token_endpoint_auth_method":"none"}`); status != http.StatusBadRequest {
+		t.Errorf("six redirect URIs accepted: %d", status)
+	}
+	status, m := h.register(`{"redirect_uris":["https://a.example/cb"],"token_endpoint_auth_method":"none","client_name":"Cla\u202eude\u0000 ` + strings.Repeat("x", 100) + `"}`)
+	if status != http.StatusCreated {
+		t.Fatal(status, m)
+	}
+	name := m["client_name"].(string)
+	if strings.ContainsAny(name, "\u202e\x00") || !strings.HasPrefix(name, "Claude ") || len([]rune(name)) > maxClientNameRunes {
+		t.Errorf("client name not cleaned: %q", name)
+	}
+}
+
+func TestCorruptDataFileRecovers(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "oauth.json")
+	if err := os.WriteFile(file, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := openStore(file, time.Now, func(string, ...any) {})
+	if err != nil {
+		t.Fatalf("damaged file must not stop the server: %v", err)
+	}
+	if len(st.data.Clients) != 0 {
+		t.Error("expected an empty store")
+	}
+	if _, err := os.Stat(file + ".corrupt"); err != nil {
+		t.Error("damaged file not kept aside")
 	}
 }

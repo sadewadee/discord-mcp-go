@@ -63,7 +63,9 @@ How it works:
 
 - The server is its own authorization server, following the MCP authorization spec: protected resource metadata (`/.well-known/oauth-protected-resource`), authorization server metadata (`/.well-known/oauth-authorization-server`), dynamic client registration (`/oauth/register`), the authorization code flow with mandatory PKCE (`/oauth/authorize`, `/oauth/token`) and token revocation (`/oauth/revoke`).
 - Discord sign-in only asks for the `identify` scope: the server learns who you are, nothing else.
-- Access tokens last 1 hour; refresh tokens 30 days and are rotated on every use. A reused refresh token or authorization code revokes everything issued from that sign-in.
+- Access tokens last 1 hour; refresh tokens 30 days and are rotated on every use. Presenting an old refresh token again more than 30 seconds after it was exchanged, or reusing an authorization code, revokes everything issued from that sign-in. A retry within 30 seconds is only refused.
+- The consent page shows the client's self-chosen name (marked as unverified) and the full redirect address. Only allow sign-ins you started yourself.
+- Sign-in state is kept in a signed cookie in your browser, not on the server; a sign-in must finish within 10 minutes in the same browser.
 - Whether a user is allowed is checked again on every request: remove someone from `MCP_ALLOWED_USERS` and restart, and their tokens stop working.
 - Tokens and client secrets are stored only as SHA-256 hashes.
 
