@@ -14,11 +14,11 @@ import (
 	"github.com/sadewadee/discord-mcp-go/internal/tools"
 )
 
-// Name and Version identify the server to MCP clients.
-const (
-	Name    = "discord-mcp-server"
-	Version = "1.0.0"
-)
+// Name identifies the server to MCP clients.
+const Name = "discord-mcp-server"
+
+// Version is reported to MCP clients. Release builds set it from the tag.
+var Version = "dev"
 
 // MCPPath is where streamable HTTP is served; HealthPath reports liveness.
 const (

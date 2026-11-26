@@ -38,6 +38,12 @@ DISCORD_TOKEN=... MCP_TRANSPORT=http go run ./cmd/discord-mcp
 
 Container builds and `docker compose up` run on a remote server, never on the development Mac.
 
+## Release
+
+- `.github/workflows/ci.yml` runs gofmt, vet and `go test -race` on every push and pull request.
+- `.github/workflows/release.yml` publishes a multi-arch image (`linux/amd64`, `linux/arm64`) to `ghcr.io/sadewadee/discord-mcp-go`: `:edge` and `:sha-<commit>` from `main`; `:X.Y.Z`, `:X.Y` and `:latest` from a `vX.Y.Z` tag, which also attaches binaries to the GitHub release.
+- The version is injected with `-ldflags "-X main.version=..."` and reported to MCP clients and by `discord-mcp --version`.
+
 ## Configuration
 
 | Variable | Required | Meaning |

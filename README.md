@@ -25,6 +25,32 @@ It lets AI assistants such as Claude manage a Discord server through a bot accou
 
 ## Running
 
+### Container image
+
+Images for `linux/amd64` and `linux/arm64` are published to GitHub Container Registry:
+
+| Tag | Built from |
+| --- | --- |
+| `ghcr.io/sadewadee/discord-mcp-go:latest` | the latest release tag |
+| `ghcr.io/sadewadee/discord-mcp-go:1.2.3`, `:1.2` | release `v1.2.3` |
+| `ghcr.io/sadewadee/discord-mcp-go:edge` | the latest commit on `main` |
+
+HTTP:
+
+```bash
+docker run -d --name discord-mcp --restart unless-stopped -p 8085:8085 \
+  -e MCP_TRANSPORT=http -e DISCORD_TOKEN -e DISCORD_GUILD_ID \
+  ghcr.io/sadewadee/discord-mcp-go:latest
+```
+
+stdio (the MCP client starts the container):
+
+```bash
+docker run --rm -i -e DISCORD_TOKEN -e DISCORD_GUILD_ID ghcr.io/sadewadee/discord-mcp-go:latest
+```
+
+The MCP endpoint is `http://localhost:8085/mcp`, and `http://localhost:8085/health` returns `{"status":"UP"}`.
+
 ### Docker Compose (HTTP)
 
 ```bash
@@ -32,20 +58,29 @@ cp .env.example .env   # then fill in DISCORD_TOKEN and, optionally, DISCORD_GUI
 ```
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-The MCP endpoint is `http://localhost:8085/mcp`, and `http://localhost:8085/health` returns `{"status":"UP"}`.
+Use `docker compose up -d --build` to build the image from source instead of pulling it.
 
-### Docker (stdio)
+### Installing into another container image
+
+The binary is static, so it runs in any Linux image that has CA certificates. Copy it from the published image:
+
+```dockerfile
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=ghcr.io/sadewadee/discord-mcp-go:latest /usr/local/bin/discord-mcp /usr/local/bin/discord-mcp
+```
+
+Or download a release archive (replace the version and architecture as needed):
 
 ```bash
-docker build -t discord-mcp-go .
+curl -fsSL https://github.com/sadewadee/discord-mcp-go/releases/download/v0.1.0/discord-mcp_v0.1.0_linux_amd64.tar.gz \
+  | tar -xz --strip-components=1 -C /usr/local/bin discord-mcp_v0.1.0_linux_amd64/discord-mcp
 ```
 
-```bash
-docker run --rm -i -e DISCORD_TOKEN -e DISCORD_GUILD_ID discord-mcp-go
-```
+Check the installed version with `discord-mcp --version`.
 
 ### From source
 
@@ -104,7 +139,7 @@ stdio through Docker:
   "mcpServers": {
     "discord-mcp": {
       "command": "docker",
-      "args": ["run", "--rm", "-i", "-e", "DISCORD_TOKEN", "-e", "DISCORD_GUILD_ID", "discord-mcp-go"],
+      "args": ["run", "--rm", "-i", "-e", "DISCORD_TOKEN", "-e", "DISCORD_GUILD_ID", "ghcr.io/sadewadee/discord-mcp-go:latest"],
       "env": {
         "DISCORD_TOKEN": "YOUR_DISCORD_BOT_TOKEN",
         "DISCORD_GUILD_ID": "OPTIONAL_DEFAULT_SERVER_ID"
@@ -274,3 +309,11 @@ go test ./...
 ```
 
 Tests need no Discord connection. See [`CLAUDE.md`](CLAUDE.md) for the layout and the output contracts the tools keep.
+
+## Releasing
+
+Push a tag such as `v0.1.0`. The release workflow publishes the image tags above and attaches binaries for Linux, macOS and Windows (with `checksums.txt`) to the GitHub release.
+
+## License
+
+[MIT](LICENSE)

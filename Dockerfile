@@ -1,4 +1,6 @@
-FROM docker.io/library/golang:1.25-alpine AS build
+# Build on the native platform and cross-compile, so multi-arch images build
+# without emulation.
+FROM --platform=$BUILDPLATFORM docker.io/library/golang:1.25-alpine AS build
 
 WORKDIR /src
 
@@ -6,9 +8,18 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/discord-mcp ./cmd/discord-mcp
+ARG TARGETOS
+ARG TARGETARCH
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/discord-mcp ./cmd/discord-mcp
 
 FROM docker.io/library/alpine:3.22
+
+LABEL org.opencontainers.image.title="discord-mcp-go" \
+      org.opencontainers.image.description="MCP server for managing a Discord server through a bot account" \
+      org.opencontainers.image.source="https://github.com/sadewadee/discord-mcp-go" \
+      org.opencontainers.image.licenses="MIT"
 
 # ca-certificates for TLS to Discord; wget (busybox) is used by the compose health check.
 RUN apk add --no-cache ca-certificates \

@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -24,11 +25,22 @@ import (
 	"github.com/sadewadee/discord-mcp-go/internal/tools"
 )
 
+// version is set at build time with -ldflags "-X main.version=v1.2.3".
+var version = "dev"
+
 func main() {
 	os.Exit(run())
 }
 
 func run() int {
+	showVersion := flag.Bool("version", false, "print the version and exit")
+	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return 0
+	}
+	server.Version = version
+
 	cfg, err := config.FromEnv()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())

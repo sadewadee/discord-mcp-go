@@ -1,9 +1,10 @@
 services:
   discord-mcp:
     container_name: discord-mcp
+    # Pulls the published image; `docker compose up --build` builds from source instead.
+    image: ghcr.io/sadewadee/discord-mcp-go:latest
     build:
       context: .
-    image: discord-mcp-go:latest
     restart: unless-stopped
     ports:
       - "8085:8085"
