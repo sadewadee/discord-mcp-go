@@ -33,7 +33,7 @@ Every tool group is a method on `*Toolset` that returns `[]Tool`; `Toolset.All` 
 go build ./...
 go vet ./...
 go test ./...
-DISCORD_TOKEN=... MCP_TRANSPORT=http go run ./cmd/discord-mcp
+DISCORD_TOKEN=... go run ./cmd/discord-mcp   # from a terminal: HTTP on :8085
 ```
 
 Container builds and `docker compose up` run on a remote server, never on the development Mac.
@@ -50,15 +50,14 @@ Container builds and `docker compose up` run on a remote server, never on the de
 | --- | --- | --- |
 | `DISCORD_TOKEN` | yes | Bot token. The process exits with status 1 if it is empty or rejected. |
 | `DISCORD_GUILD_ID` | no | Default guild. When set, tools may omit `guildId`. |
-| `MCP_TRANSPORT` | no | `stdio` (default) or `http`. |
-| `PORT` | no | HTTP port, default `8085`. |
+| `MCP_TRANSPORT` | no | Unset or `auto` picks the transport from stdin (`config.DetectTransport`); `stdio` or `http` forces one. |
 | `LOG_FILE` | no | Log file, default `./logs/discord-mcp-server.log`. |
 
 Runtime secrets live in `.env`, which is gitignored. Never commit a token.
 
 ## Contracts MCP clients depend on
 
-- **Two transports.** stdio is the default. `MCP_TRANSPORT=http` serves streamable HTTP at `/mcp` on port 8085, with a health endpoint at `/health` that returns `{"status":"UP"}`. `docker-compose.yml` health-checks that endpoint.
+- **Two transports, chosen automatically.** A pipe (or file or socket) on stdin means an MCP client launched the server: stdio. A terminal, `/dev/null` or closed stdin (shell, service, `docker run -d`, compose) means HTTP: streamable HTTP at `/mcp` on the fixed port 8085, with a health endpoint at `/health` that returns `{"status":"UP"}`. `MCP_TRANSPORT=stdio|http` overrides the choice. `docker-compose.yml` health-checks `/health`.
 - **stdout is the MCP channel in stdio mode.** Nothing else may be written to it. Logs go to `LOG_FILE` (and also stdout in HTTP mode); startup failures go to stderr, where MCP clients pick them up. discordgo's logger and the standard `log` package are routed to the same place.
 - **Actionable startup errors.** A rejected token (close code 4004 or HTTP 401) or a missing privileged intent (close code 4014) produces a specific message with the fix (`gateway.StartupFailure`).
 - **Gateway intents.** All non-privileged intents plus `GUILD_MEMBERS`. Members of every guild are chunked into the state cache at startup; member lookup and search tools rely on that cache.

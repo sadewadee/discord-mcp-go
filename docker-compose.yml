@@ -9,7 +9,6 @@ services:
     ports:
       - "8085:8085"
     environment:
-      MCP_TRANSPORT: ${MCP_TRANSPORT:-http}
       DISCORD_TOKEN: ${DISCORD_TOKEN}
       DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:-}
     healthcheck:

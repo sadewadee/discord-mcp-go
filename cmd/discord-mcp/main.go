@@ -58,6 +58,8 @@ func run() int {
 	}
 	defer closeLog()
 
+	logger.Info("MCP transport selected", "transport", cfg.Transport, "reason", cfg.TransportReason)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -76,7 +78,7 @@ func run() int {
 
 	switch cfg.Transport {
 	case config.TransportHTTP:
-		err = server.RunHTTP(ctx, srv, cfg.Port, logger)
+		err = server.RunHTTP(ctx, srv, config.Port, logger)
 	default:
 		logger.Info("MCP transport: stdio. Each client session starts a separate server process.")
 		err = server.RunStdio(ctx, srv)

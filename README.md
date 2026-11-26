@@ -7,6 +7,15 @@ It lets AI assistants such as Claude manage a Discord server through a bot accou
 - Two transports: **stdio** (default) and **streamable HTTP** at `/mcp`
 - 82 tools, all with string parameters and formatted text results
 
+## Transport selection
+
+The server picks its transport automatically; there is nothing to configure:
+
+- **stdio** when an MCP client starts it (stdin is a pipe), including `docker run -i`.
+- **HTTP** on port **8085** otherwise: started from a terminal, as a service, or with `docker run -d` / Docker Compose. MCP is served at `/mcp` and `/health` returns `{"status":"UP"}`.
+
+`MCP_TRANSPORT=stdio` or `MCP_TRANSPORT=http` forces one if the automatic choice is wrong for your setup. The port is always 8085; map it to another host port with Docker (`-p 9000:8085`) if needed.
+
 ## Requirements
 
 - A Discord bot token. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications), add a bot, and copy its token.
@@ -19,8 +28,7 @@ It lets AI assistants such as Claude manage a Discord server through a bot accou
 | --- | --- | --- | --- |
 | `DISCORD_TOKEN` | yes | | Bot token, without surrounding quotes. |
 | `DISCORD_GUILD_ID` | no | | Default server ID. Tools that take a `guildId` may then omit it. |
-| `MCP_TRANSPORT` | no | `stdio` | `stdio` or `http`. |
-| `PORT` | no | `8085` | HTTP port when `MCP_TRANSPORT=http`. |
+| `MCP_TRANSPORT` | no | `auto` | Leave unset. Set `stdio` or `http` only to override the automatic choice. |
 | `LOG_FILE` | no | `./logs/discord-mcp-server.log` | Log file. In stdio mode nothing but MCP traffic is written to stdout. |
 
 ## Running
@@ -39,7 +47,7 @@ HTTP:
 
 ```bash
 docker run -d --name discord-mcp --restart unless-stopped -p 8085:8085 \
-  -e MCP_TRANSPORT=http -e DISCORD_TOKEN -e DISCORD_GUILD_ID \
+  -e DISCORD_TOKEN -e DISCORD_GUILD_ID \
   ghcr.io/sadewadee/discord-mcp-go:latest
 ```
 
@@ -90,12 +98,10 @@ Requires Go 1.25 or newer.
 go install github.com/sadewadee/discord-mcp-go/cmd/discord-mcp@latest
 ```
 
-```bash
-DISCORD_TOKEN=... discord-mcp
-```
+Run from a terminal, it serves HTTP on port 8085; started by an MCP client, it speaks stdio:
 
 ```bash
-DISCORD_TOKEN=... MCP_TRANSPORT=http discord-mcp
+DISCORD_TOKEN=... discord-mcp
 ```
 
 ## Client configuration

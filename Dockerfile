@@ -29,10 +29,11 @@ RUN apk add --no-cache ca-certificates \
 WORKDIR /app
 COPY --from=build /out/discord-mcp /usr/local/bin/discord-mcp
 
+# The transport is picked automatically: stdio with `docker run -i` (an MCP
+# client piping to the container), HTTP on port 8085 otherwise (docker run -d,
+# compose). MCP_TRANSPORT=stdio|http overrides it.
 ENV DISCORD_TOKEN="" \
     DISCORD_GUILD_ID="" \
-    MCP_TRANSPORT="stdio" \
-    PORT="8085" \
     LOG_FILE="/app/logs/discord-mcp-server.log"
 
 # Run as an unprivileged user.
