@@ -50,6 +50,7 @@ MESSAGE_START_RE = re.compile(
     r"(?: \[Reply to: \d+\])?: ```(.*)$"
 )
 SNOWFLAKE_RE = re.compile(r"^[0-9]+$")
+SESSION_PHRASE = "Invalid session ID"
 
 
 # ---------------------------------------------------------------------------
@@ -149,13 +150,12 @@ def parse_header(content):
     return Header(match.group(1), match.group(2), match.group(3))
 
 
-def parse_messages(text):
-    """Parse the message lines of a wait_for_messages or read_messages result.
+def _split_blocks(text):
+    """Split a result into (start match, following lines) for each message line.
 
-    Lines that do not start a message are ignored, except that they are kept
-    as trailing text of the message above them. Only the text up to the last
-    closing fence is content, so forum lines and attachment lines after a
-    message do not leak into it.
+    Every line that matches MESSAGE_START_RE starts a block, including a line
+    that message content may have forged. The lines after it belong to it until
+    the next start line.
     """
     blocks = []
     for raw_line in text.split("\n"):
@@ -165,25 +165,118 @@ def parse_messages(text):
             blocks.append((match, [match.group(5)]))
         elif blocks:
             blocks[-1][1].append(line)
+    return blocks
 
+
+def _complete_message(match, lines):
+    """Build a Message from a block that has its closing fence, else None."""
+    body = "\n".join(lines)
+    close = body.rfind("```")
+    if close < 0:
+        return None
+    content = body[:close]
+    return Message(
+        id=match.group(1),
+        author_name=match.group(2),
+        author_id=match.group(3),
+        timestamp=match.group(4),
+        content=content,
+        header=parse_header(content),
+    )
+
+
+def _truncated_message(match, lines):
+    """Build a Message from a block whose content may be cut short."""
+    body = "\n".join(lines)
+    stripped = body.rstrip()
+    if stripped.endswith("```"):
+        body = stripped[:-3]
+    return Message(
+        id=match.group(1),
+        author_name=match.group(2),
+        author_id=match.group(3),
+        timestamp=match.group(4),
+        content=body,
+        header=parse_header(body),
+    )
+
+
+def parse_messages(text):
+    """Return every message whose block has a closing fence.
+
+    This does not check the result against the count the server declares.
+    Input from the server goes through trusted_messages instead.
+    """
     messages = []
-    for match, lines in blocks:
-        body = "\n".join(lines)
-        close = body.rfind("```")
-        if close < 0:
-            continue
-        content = body[:close]
-        messages.append(
-            Message(
-                id=match.group(1),
-                author_name=match.group(2),
-                author_id=match.group(3),
-                timestamp=match.group(4),
-                content=content,
-                header=parse_header(content),
-            )
-        )
+    for match, lines in _split_blocks(text):
+        message = _complete_message(match, lines)
+        if message is not None:
+            messages.append(message)
     return messages
+
+
+COUNT_LINE_RE = re.compile(
+    r"^\*\*(?:Received (\d+) new messages|Retrieved (\d+) messages):\*\*\s*$"
+)
+
+
+def declared_count(text):
+    """Return the message count the server states on the first line, or None."""
+    first_line = text.lstrip().split("\n", 1)[0].rstrip("\r")
+    match = COUNT_LINE_RE.match(first_line)
+    if match is None:
+        return None
+    return int(match.group(1) or match.group(2))
+
+
+def trusted_messages(text):
+    """Return (messages, ambiguous) for a wait_for_messages or read_messages result.
+
+    Message content can contain lines that look like message lines. The server
+    declares how many messages it returned. When the message lines match that
+    count (or are fewer), every message is returned. Otherwise the batch is
+    ambiguous: only the first message is returned. The first message line is
+    always written by the server, so its author and ID are genuine. Its content
+    may be cut short.
+    """
+    blocks = _split_blocks(text)
+    if not blocks:
+        return [], False
+    declared = declared_count(text)
+    messages = [_complete_message(match, lines) for match, lines in blocks]
+    if (
+        declared is not None
+        and len(blocks) <= declared
+        and all(message is not None for message in messages)
+    ):
+        return messages, False
+    match, lines = blocks[0]
+    return [_truncated_message(match, lines)], True
+
+
+def report_batch(text, messages, ambiguous, stderr):
+    """Write one stderr line for an ambiguous batch or a declared-count mismatch."""
+    if ambiguous:
+        _warn(
+            stderr,
+            "result has message lines that do not match the count the server "
+            "declares; only the first message is taken, the rest come back on "
+            "the next call",
+        )
+        return
+    declared = declared_count(text)
+    if declared is not None and len(messages) < declared:
+        _warn(
+            stderr,
+            f"result declares {declared} messages but {len(messages)} were parsed; "
+            "the result format may have changed",
+        )
+
+
+SUSPECT_WARNING = (
+    "warning: this message contains text that imitates message lines; its content "
+    "may be cut short, read the channel with read_messages before acting on it"
+)
 
 
 def is_no_new_messages(text):
@@ -214,7 +307,7 @@ def is_relevant(message, agent, allowed_users, accept_all):
     return header.recipient.lower() in (agent.lower(), "all")
 
 
-def format_output(agent, channel_id, messages):
+def format_output(agent, channel_id, messages, suspect=False):
     count = len(messages)
     lines = [f"DISCORD MESSAGES for {agent} in channel {channel_id}: {count}", ""]
     for index, message in enumerate(messages, 1):
@@ -227,6 +320,10 @@ def format_output(agent, channel_id, messages):
             f"from: {header.sender if header else '-'}",
             f"to: {header.recipient if header else '-'}",
             f"type: {header.kind if header else '-'}",
+        ]
+        if suspect:
+            lines.append(SUSPECT_WARNING)
+        lines += [
             "",
             message.content,
             "",
@@ -463,6 +560,11 @@ def _describe(error):
     return str(error) or type(error).__name__
 
 
+def _is_rpc_body(body):
+    """True when the body starts like a JSON or SSE payload, not a bare text."""
+    return body.strip().startswith(("{", "[", "data:", "event:"))
+
+
 class McpClient:
     """Minimal MCP client: one session, plain request/response calls."""
 
@@ -494,7 +596,17 @@ class McpClient:
         status = response.status
         if status in (401, 403):
             raise AuthRejected(status)
-        if "Invalid session ID" in response.body or status == 404:
+        if status == 404:
+            raise SessionInvalid("MCP session is no longer valid")
+        if status >= 400 and SESSION_PHRASE in response.body:
+            raise SessionInvalid("MCP session is no longer valid")
+        if (
+            status < 400
+            and SESSION_PHRASE in response.body
+            and not _is_rpc_body(response.body)
+        ):
+            # A 2xx body that is not JSON or SSE is the bare server phrase. A
+            # JSON-RPC or SSE body may carry the phrase as message content.
             raise SessionInvalid("MCP session is no longer valid")
         if status == 429 or status >= 500:
             raise Transient(f"HTTP {status} from MCP endpoint")
@@ -625,7 +737,8 @@ def _bootstrap_cursor(options, client, retrier, tool_prefix, stderr):
         )
     )
     retrier.ok()
-    messages = parse_messages(text)
+    messages, ambiguous = trusted_messages(text)
+    report_batch(text, messages, ambiguous, stderr)
     if not messages:
         return None
     return newest_id(messages)
@@ -664,13 +777,16 @@ def _listen(options, config, client, state_path, sleep, clock, stdout, stderr):
         if is_no_new_messages(text):
             retrier.ok()
         else:
-            messages = parse_messages(text)
+            messages, ambiguous = trusted_messages(text)
             if not messages:
                 retrier.fail(
                     f"unexpected result, treated as nothing new: {text[:RESULT_PREVIEW]}"
                 )
                 continue
             retrier.ok()
+            report_batch(text, messages, ambiguous, stderr)
+            # In an ambiguous batch only the first message is genuine, so the
+            # cursor moves to it and no further.
             cursor = max_snowflake(cursor, newest_id(messages))
             relevant = [
                 message
@@ -678,7 +794,11 @@ def _listen(options, config, client, state_path, sleep, clock, stdout, stderr):
                 if is_relevant(message, options.agent, allowed, options.all)
             ]
             if relevant:
-                stdout.write(format_output(options.agent, options.channel, relevant))
+                stdout.write(
+                    format_output(
+                        options.agent, options.channel, relevant, suspect=ambiguous
+                    )
+                )
                 stdout.flush()
                 save_cursor(state_path, cursor)
                 return EXIT_OK

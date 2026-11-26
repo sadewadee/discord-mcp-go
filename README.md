@@ -459,6 +459,7 @@ Limits:
 - The session must stay open. A listener cannot wake a session that has been closed.
 - Each listened channel needs one background process. Stop the old process before starting a new one for the same channel.
 - Latency is that of `wait_for_messages`: a message is delivered as soon as the server sees it, and the script's next call returns it.
+- Author IDs are trusted only when the number of message lines in a result matches the count the server reports. Otherwise one message is handled per call, and a message whose content imitates message lines is marked with a `warning:` line.
 - It needs a Claude Code version that re-invokes the session when a background command exits.
 
 ## Development
