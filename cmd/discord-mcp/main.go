@@ -76,6 +76,13 @@ func run() int {
 	defer session.Close()
 
 	toolset := tools.New(session, cfg.DefaultGuildID, logger)
+	defer toolset.Close()
+	// On SIGTERM, wake pending wait_for_messages calls at once so the HTTP
+	// server's graceful shutdown does not wait out their timeouts.
+	go func() {
+		<-ctx.Done()
+		toolset.Close()
+	}()
 	all := toolset.All()
 	srv := server.New(all, logger)
 	logger.Info("tools registered", "count", len(all))

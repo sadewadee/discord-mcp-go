@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -47,6 +48,9 @@ type Toolset struct {
 	s              *discordgo.Session
 	defaultGuildID string
 	log            *slog.Logger
+
+	hub         *hub
+	burstWindow time.Duration // wait_for_messages collects a burst this long after the first message
 }
 
 // New returns a Toolset backed by session. defaultGuildID may be empty.
@@ -54,11 +58,41 @@ func New(session *discordgo.Session, defaultGuildID string, log *slog.Logger) *T
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	return &Toolset{
+	t := &Toolset{
 		s:              session,
 		defaultGuildID: defaultGuildID,
 		log:            log,
+		burstWindow:    500 * time.Millisecond,
 	}
+	t.hub = newHub(t.threadParent)
+	// The hub sees every message the gateway delivers, including the bot's
+	// own, which is what other agents posting through the same bot wait for.
+	session.AddHandler(t.hub.onMessageCreate)
+	return t
+}
+
+// Close wakes pending wait_for_messages calls so the server can shut down
+// promptly; they return an error. New waits are refused.
+func (t *Toolset) Close() { t.hub.close() }
+
+// threadParent returns the parent channel ID of a thread, or "". A thread
+// missing from the cache is fetched once and added to it.
+func (t *Toolset) threadParent(channelID string) string {
+	c := t.cachedChannel(channelID)
+	if c == nil {
+		fetched, err := t.s.Channel(channelID)
+		if err != nil || fetched == nil {
+			return ""
+		}
+		if fetched.IsThread() {
+			_ = t.s.State.ChannelAdd(fetched)
+		}
+		c = fetched
+	}
+	if c.IsThread() {
+		return c.ParentID
+	}
+	return ""
 }
 
 // All returns every tool, sorted by name.
@@ -80,6 +114,7 @@ func (t *Toolset) All() []Tool {
 		t.channelPermissionTools(),
 		t.emojiTools(),
 		t.forumTools(),
+		t.busTools(),
 	} {
 		all = append(all, group...)
 	}

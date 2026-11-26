@@ -17,8 +17,12 @@ func (t *Toolset) messageTools() []Tool {
 		{
 			Name:        "send_message",
 			Description: "Send a message to a specific channel",
-			Params:      []Param{req("channelId", "Discord channel ID"), req("message", "Message content")},
-			Handler:     t.sendMessage,
+			Params: []Param{
+				req("channelId", "Discord channel ID"),
+				req("message", "Message content"),
+				opt("replyToMessageId", "Send as a reply to this message in the same channel, without pinging its author"),
+			},
+			Handler: t.sendMessage,
 		},
 		{
 			Name:        "edit_message",
@@ -126,7 +130,27 @@ func (t *Toolset) sendMessage(_ context.Context, a Args) (string, error) {
 	if ch == nil {
 		return "", errChannelNotFound
 	}
-	sent, err := t.s.ChannelMessageSend(ch.ID, a.Get("message"))
+	var sent *discordgo.Message
+	var err error
+	if replyTo := strings.TrimSpace(a.Get("replyToMessageId")); replyTo != "" {
+		failIfMissing := true // an unknown message ID is an error, not a plain send
+		sent, err = t.s.ChannelMessageSendComplex(ch.ID, &discordgo.MessageSend{
+			Content: a.Get("message"),
+			Reference: &discordgo.MessageReference{
+				MessageID: replyTo, ChannelID: ch.ID, GuildID: ch.GuildID, FailIfNotExists: &failIfMissing,
+			},
+			// Mentions in the text work as in a plain message; only the
+			// reply itself does not notify the replied-to author.
+			AllowedMentions: &discordgo.MessageAllowedMentions{
+				Parse: []discordgo.AllowedMentionType{
+					discordgo.AllowedMentionTypeUsers, discordgo.AllowedMentionTypeRoles, discordgo.AllowedMentionTypeEveryone,
+				},
+				RepliedUser: false,
+			},
+		})
+	} else {
+		sent, err = t.s.ChannelMessageSend(ch.ID, a.Get("message"))
+	}
 	if err != nil {
 		return "", err
 	}
