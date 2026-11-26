@@ -50,6 +50,9 @@ type Config struct {
 	AllowedUsers        []string // MCP_ALLOWED_USERS
 	OAuthDataFile       string   // OAUTH_DATA_FILE
 	AuthToken           string   // MCP_AUTH_TOKEN
+	// InsecureNoAuth allows HTTP without authentication (MCP_INSECURE_NO_AUTH=true),
+	// for example behind a proxy that authenticates on its own.
+	InsecureNoAuth bool
 }
 
 // OAuthEnabled reports whether OAuth sign-in is configured.
@@ -86,7 +89,25 @@ func Load(getenv func(string) string, stdin fs.FileMode, stdinErr error) (Config
 	if err := loadAuth(&cfg, getenv); err != nil {
 		return cfg, err
 	}
+	if err := requireHTTPAuth(cfg); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// requireHTTPAuth refuses to serve HTTP without authentication: the HTTP
+// endpoint controls the bot, so an open one is never the default.
+func requireHTTPAuth(cfg Config) error {
+	if cfg.Transport != TransportHTTP || cfg.AuthEnabled() || cfg.InsecureNoAuth {
+		return nil
+	}
+	return fmt.Errorf("the HTTP transport needs authentication, and none is configured (HTTP was chosen because %s).\n"+
+		"  Set one of:\n"+
+		"    MCP_AUTH_TOKEN         a bearer token of at least %d characters, e.g. from: openssl rand -hex 32\n"+
+		"    MCP_PUBLIC_URL + DISCORD_CLIENT_SECRET   OAuth with \"Sign in with Discord\" (see README)\n"+
+		"  To serve HTTP without authentication anyway, for example behind a proxy that authenticates, set MCP_INSECURE_NO_AUTH=true.\n"+
+		"  To use stdio instead, start the server from an MCP client or set MCP_TRANSPORT=stdio",
+		cfg.TransportReason, minAuthTokenLength)
 }
 
 var snowflakeRe = regexp.MustCompile(`^\d{17,20}$`)
@@ -96,6 +117,13 @@ func loadAuth(cfg *Config, getenv func(string) string) error {
 	cfg.DiscordClientID = strings.TrimSpace(getenv("DISCORD_CLIENT_ID"))
 	cfg.DiscordClientSecret = strings.TrimSpace(getenv("DISCORD_CLIENT_SECRET"))
 	cfg.AuthToken = strings.TrimSpace(getenv("MCP_AUTH_TOKEN"))
+	switch v := strings.ToLower(strings.TrimSpace(getenv("MCP_INSECURE_NO_AUTH"))); v {
+	case "", "false", "0", "no":
+	case "true", "1", "yes":
+		cfg.InsecureNoAuth = true
+	default:
+		return fmt.Errorf("MCP_INSECURE_NO_AUTH must be true or false, got %q", v)
+	}
 	cfg.OAuthDataFile = strings.TrimSpace(getenv("OAUTH_DATA_FILE"))
 	if cfg.OAuthDataFile == "" {
 		cfg.OAuthDataFile = DefaultOAuthDataFile

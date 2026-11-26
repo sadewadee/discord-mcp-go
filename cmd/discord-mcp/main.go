@@ -176,8 +176,8 @@ func httpAuth(cfg config.Config, session *discordgo.Session, logger *slog.Logger
 		logger.Info("HTTP endpoint protected by MCP_AUTH_TOKEN")
 		return staticAuth{cfg.AuthToken}, nil
 	default:
-		logger.Warn("HTTP endpoint has NO authentication: anyone who can reach port 8085 can use every tool. " +
-			"Set MCP_PUBLIC_URL and DISCORD_CLIENT_SECRET for OAuth, or MCP_AUTH_TOKEN, unless the port is only reachable by you.")
+		// Only reachable with MCP_INSECURE_NO_AUTH=true; config refuses otherwise.
+		logger.Warn("HTTP endpoint has NO authentication (MCP_INSECURE_NO_AUTH=true): anyone who can reach port 8085 can use every tool")
 		return nil, nil
 	}
 }

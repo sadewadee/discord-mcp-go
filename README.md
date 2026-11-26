@@ -12,7 +12,7 @@ It lets AI assistants such as Claude manage a Discord server through a bot accou
 The server picks its transport automatically; there is nothing to configure:
 
 - **stdio** when an MCP client starts it (stdin is a pipe), including `docker run -i`.
-- **HTTP** on port **8085** otherwise: started from a terminal, as a service, or with `docker run -d` / Docker Compose. MCP is served at `/mcp` and `/health` returns `{"status":"UP"}`.
+- **HTTP** on port **8085** otherwise: started from a terminal, as a service, or with `docker run -d` / Docker Compose. MCP is served at `/mcp` and `/health` returns `{"status":"UP"}`. HTTP requires authentication (see [Authentication](#authentication-http)); without it the server refuses to start.
 
 `MCP_TRANSPORT=stdio` or `MCP_TRANSPORT=http` forces one if the automatic choice is wrong for your setup. The port is always 8085; map it to another host port with Docker (`-p 9000:8085`) if needed.
 
@@ -35,9 +35,11 @@ The server picks its transport automatically; there is nothing to configure:
 | `DISCORD_CLIENT_ID` | no | the bot's application | Set only if sign-in uses a different Discord application than the bot. |
 | `MCP_ALLOWED_USERS` | for OAuth¹ | | Comma-separated Discord user IDs allowed to sign in. |
 | `OAUTH_DATA_FILE` | no | `./data/oauth.json` | Where registered clients and tokens are stored (token hashes only). |
-| `MCP_AUTH_TOKEN` | no | | A fixed bearer token, at least 32 characters, accepted alongside or instead of OAuth. |
+| `MCP_AUTH_TOKEN` | for HTTP² | | A fixed bearer token, at least 32 characters, accepted alongside or instead of OAuth. |
+| `MCP_INSECURE_NO_AUTH` | no | `false` | `true` serves HTTP without authentication. Only for setups where something in front of the server already authenticates every request. |
 
 ¹ The owner of `DISCORD_GUILD_ID` may always sign in, so with `DISCORD_GUILD_ID` set the list is optional.
+² HTTP needs `MCP_AUTH_TOKEN` or OAuth (`MCP_PUBLIC_URL` + `DISCORD_CLIENT_SECRET`); otherwise the server refuses to start. stdio needs neither.
 
 ## Authentication (HTTP)
 
@@ -47,7 +49,7 @@ stdio needs no authentication: the MCP client starts the process itself. The HTT
 | --- | --- |
 | `MCP_PUBLIC_URL` + `DISCORD_CLIENT_SECRET` | **OAuth 2.1.** Clients discover the server's authorization endpoints, register themselves, and send you to sign in with Discord and approve the client. Works with claude.ai connectors, Claude Code, Cursor and other OAuth-capable MCP clients. |
 | `MCP_AUTH_TOKEN` | Clients send `Authorization: Bearer <token>`. Can be combined with OAuth. |
-| neither | No authentication. The server logs a warning. Only acceptable if port 8085 is reachable by you alone. |
+| neither | **The server refuses to start** and explains what to set. `MCP_INSECURE_NO_AUTH=true` overrides this (with a warning) for setups where a proxy in front already authenticates every request. |
 
 ### Setting up OAuth
 
@@ -84,8 +86,10 @@ Images for `linux/amd64` and `linux/arm64` are published to GitHub Container Reg
 HTTP:
 
 ```bash
+export MCP_AUTH_TOKEN=$(openssl rand -hex 32)   # or set up OAuth, see Authentication
 docker run -d --name discord-mcp --restart unless-stopped -p 8085:8085 \
-  -e DISCORD_TOKEN -e DISCORD_GUILD_ID \
+  -e DISCORD_TOKEN -e DISCORD_GUILD_ID -e MCP_AUTH_TOKEN \
+  -v discord-mcp-data:/app/data \
   ghcr.io/sadewadee/discord-mcp-go:latest
 ```
 
@@ -100,7 +104,7 @@ The MCP endpoint is `http://localhost:8085/mcp`, and `http://localhost:8085/heal
 ### Docker Compose (HTTP)
 
 ```bash
-cp .env.example .env   # then fill in DISCORD_TOKEN and, optionally, DISCORD_GUILD_ID
+cp .env.example .env   # fill in DISCORD_TOKEN, and MCP_AUTH_TOKEN or the OAuth settings
 ```
 
 ```bash
@@ -136,10 +140,10 @@ Requires Go 1.25 or newer.
 go install github.com/sadewadee/discord-mcp-go/cmd/discord-mcp@latest
 ```
 
-Run from a terminal, it serves HTTP on port 8085; started by an MCP client, it speaks stdio:
+Started by an MCP client, it speaks stdio. Run from a terminal, it serves HTTP on port 8085, which needs authentication:
 
 ```bash
-DISCORD_TOKEN=... discord-mcp
+DISCORD_TOKEN=... MCP_AUTH_TOKEN=$(openssl rand -hex 32) discord-mcp
 ```
 
 ## Client configuration

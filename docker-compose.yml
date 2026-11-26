@@ -18,6 +18,8 @@ services:
       MCP_ALLOWED_USERS: ${MCP_ALLOWED_USERS:-}
       # and/or a fixed bearer token
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
+      # Without MCP_AUTH_TOKEN or OAuth the server refuses to start, unless this is true
+      MCP_INSECURE_NO_AUTH: ${MCP_INSECURE_NO_AUTH:-false}
     volumes:
       - discord-mcp-data:/app/data
     healthcheck:

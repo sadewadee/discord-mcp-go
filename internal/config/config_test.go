@@ -11,6 +11,8 @@ func env(m map[string]string) func(string) string {
 	return func(k string) string { return m[k] }
 }
 
+var validToken = strings.Repeat("t", 32)
+
 const (
 	pipe     = fs.ModeNamedPipe
 	terminal = fs.ModeDevice | fs.ModeCharDevice
@@ -52,6 +54,7 @@ func TestLoadOverrides(t *testing.T) {
 	cfg, err := Load(env(map[string]string{
 		"DISCORD_GUILD_ID": " 123 ",
 		"MCP_TRANSPORT":    "HTTP",
+		"MCP_AUTH_TOKEN":   validToken,
 		"LOG_FILE":         "/tmp/x.log",
 	}), pipe, nil)
 	if err != nil {
@@ -66,7 +69,7 @@ func TestLoadOverrides(t *testing.T) {
 		t.Errorf("stdio override: %+v %v", cfg, err)
 	}
 
-	cfg, err = Load(env(map[string]string{"MCP_TRANSPORT": "auto"}), terminal, nil)
+	cfg, err = Load(env(map[string]string{"MCP_TRANSPORT": "auto", "MCP_AUTH_TOKEN": validToken}), terminal, nil)
 	if err != nil || cfg.Transport != TransportHTTP {
 		t.Errorf("auto: %+v %v", cfg, err)
 	}
@@ -137,5 +140,48 @@ func TestLoadAuth(t *testing.T) {
 	cfg, err = Load(env(map[string]string{"MCP_AUTH_TOKEN": strings.Repeat("x", 32)}), pipe, nil)
 	if err != nil || cfg.OAuthEnabled() || !cfg.AuthEnabled() {
 		t.Errorf("static token: %+v %v", cfg, err)
+	}
+}
+
+func TestHTTPRequiresAuth(t *testing.T) {
+	// HTTP without any authentication is refused, whether chosen
+	// automatically or forced.
+	for name, tc := range map[string]struct {
+		env   map[string]string
+		stdin fs.FileMode
+	}{
+		"auto from a terminal": {map[string]string{}, terminal},
+		"forced http":          {map[string]string{"MCP_TRANSPORT": "http"}, pipe},
+		"opt-out set to false": {map[string]string{"MCP_TRANSPORT": "http", "MCP_INSECURE_NO_AUTH": "false"}, pipe},
+	} {
+		_, err := Load(env(tc.env), tc.stdin, nil)
+		if err == nil || !strings.Contains(err.Error(), "needs authentication") || !strings.Contains(err.Error(), "MCP_AUTH_TOKEN") {
+			t.Errorf("%s: got %v", name, err)
+		}
+	}
+	if _, err := Load(env(map[string]string{}), terminal, nil); err == nil || !strings.Contains(err.Error(), "stdin is a terminal") {
+		t.Errorf("error should say why HTTP was chosen: %v", err)
+	}
+
+	// Any form of authentication, the explicit opt-out, or stdio is fine.
+	for name, tc := range map[string]struct {
+		env   map[string]string
+		stdin fs.FileMode
+	}{
+		"static token": {map[string]string{"MCP_AUTH_TOKEN": validToken}, terminal},
+		"oauth": {map[string]string{
+			"MCP_PUBLIC_URL": "https://mcp.example.com", "DISCORD_CLIENT_SECRET": "s", "MCP_ALLOWED_USERS": "111111111111111111",
+		}, terminal},
+		"opt-out":         {map[string]string{"MCP_INSECURE_NO_AUTH": "true"}, terminal},
+		"stdio from pipe": {map[string]string{}, pipe},
+		"forced stdio":    {map[string]string{"MCP_TRANSPORT": "stdio"}, terminal},
+	} {
+		if _, err := Load(env(tc.env), tc.stdin, nil); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+
+	if _, err := Load(env(map[string]string{"MCP_INSECURE_NO_AUTH": "maybe"}), pipe, nil); err == nil {
+		t.Error("invalid MCP_INSECURE_NO_AUTH accepted")
 	}
 }
