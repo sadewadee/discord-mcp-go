@@ -408,12 +408,67 @@ All parameters are strings; numeric values such as `count` are passed as text an
 
 - `get_server_info`: Get detailed discord server information
 
+## Claude Code skill: discord-listen
+
+An agent session that has finished its turn is idle. It never calls `wait_for_messages` on its own, so messages addressed to it are not seen until someone starts it again (see #3).
+
+The skill in [`skills/discord-listen`](skills/discord-listen) closes that gap on the client side. The session starts a small Python script as a background command and ends its turn. The script calls `wait_for_messages` over HTTP in a loop, without a language model. When a message for this session arrives, the script prints it and exits, and Claude Code re-invokes the session, which reads the message, replies through the normal Discord tools and starts the script again. Waiting costs no model tokens.
+
+Install it as a personal skill, or into one project:
+
+```bash
+cp -r skills/discord-listen ~/.claude/skills/              # personal skill
+cp -r skills/discord-listen <project>/.claude/skills/      # one project only
+```
+
+Configure the MCP endpoint and the credential with environment variables, or in a config file. The environment wins per field.
+
+| Variable | Meaning |
+| --- | --- |
+| `DISCORD_MCP_URL` | Full URL of the `/mcp` endpoint, for example `https://mcp.example.com/mcp`. |
+| `DISCORD_MCP_AUTH` | Complete `Authorization` header value, for example `Bearer <token>`. |
+| `DISCORD_MCP_TOOL_PREFIX` | Tool name prefix when the server sits behind an MCP gateway, for example `discord__`. Default empty. |
+
+The same keys can go into `${XDG_CONFIG_HOME:-~/.config}/discord-listen/config.json`:
+
+```json
+{
+  "url": "https://mcp.example.com/mcp",
+  "authorization": "Bearer <token>",
+  "tool_prefix": ""
+}
+```
+
+The file holds a credential. Restrict it to its owner with `chmod 600 ~/.config/discord-listen/config.json`. The script prints a warning if the file is readable by other users, and it never prints the authorization value.
+
+Use it in a session with `/discord-listen`, giving the channel or thread ID, the agent name and the Discord user IDs whose messages count as instructions. You can also ask the agent in plain words, for example "listen on this thread for replies from user 123456789012345678". The agent starts the script in the background and ends its turn. Each run stores a cursor in `${XDG_STATE_HOME:-~/.local/state}/discord-listen`, so messages that arrive while the session works are returned by the next run.
+
+`scripts/discord_listen.py` exits with these codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Relevant messages were printed on stdout. |
+| `2` | Configuration error, or the server reported a tool error (wrong channel ID, wrong prefix, missing permission). |
+| `3` | The endpoint rejected the authentication (HTTP 401 or 403). |
+| `4` | Too many consecutive network, server or decoding errors (`--max-errors`, default 20). |
+| `10` | No relevant message within `--max-idle-minutes`. |
+| `130` | Interrupted by SIGINT or SIGTERM. |
+
+Limits:
+
+- The session must stay open. A listener cannot wake a session that has been closed.
+- Each listened channel needs one background process. Stop the old process before starting a new one for the same channel.
+- Latency is that of `wait_for_messages`: a message is delivered as soon as the server sees it, and the script's next call returns it.
+- Author IDs are trusted only when the number of message lines in a result matches the count the server reports. Otherwise one message is handled per call, and a message whose content imitates message lines is marked with a `warning:` line.
+- It needs a Claude Code version that re-invokes the session when a background command exits.
+
 ## Development
 
 ```bash
 go build ./...
 go vet ./...
 go test ./...
+python3 -m unittest discover -s skills/discord-listen/scripts -p 'test_*.py'
 ```
 
 Tests need no Discord connection. See [`CLAUDE.md`](CLAUDE.md) for the layout and the output contracts the tools keep.
