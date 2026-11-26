@@ -30,6 +30,42 @@ The server picks its transport automatically; there is nothing to configure:
 | `DISCORD_GUILD_ID` | no | | Default server ID. Tools that take a `guildId` may then omit it. |
 | `MCP_TRANSPORT` | no | `auto` | Leave unset. Set `stdio` or `http` only to override the automatic choice. |
 | `LOG_FILE` | no | `./logs/discord-mcp-server.log` | Log file. In stdio mode nothing but MCP traffic is written to stdout. |
+| `MCP_PUBLIC_URL` | for OAuth | | Public HTTPS address of the server, e.g. `https://mcp.example.com`. Setting it turns on OAuth. |
+| `DISCORD_CLIENT_SECRET` | for OAuth | | OAuth2 client secret of the Discord application (Developer Portal → OAuth2). |
+| `DISCORD_CLIENT_ID` | no | the bot's application | Set only if sign-in uses a different Discord application than the bot. |
+| `MCP_ALLOWED_USERS` | for OAuth¹ | | Comma-separated Discord user IDs allowed to sign in. |
+| `OAUTH_DATA_FILE` | no | `./data/oauth.json` | Where registered clients and tokens are stored (token hashes only). |
+| `MCP_AUTH_TOKEN` | no | | A fixed bearer token, at least 32 characters, accepted alongside or instead of OAuth. |
+
+¹ The owner of `DISCORD_GUILD_ID` may always sign in, so with `DISCORD_GUILD_ID` set the list is optional.
+
+## Authentication (HTTP)
+
+stdio needs no authentication: the MCP client starts the process itself. The HTTP endpoint controls your bot, so protect it:
+
+| Setting | What clients do |
+| --- | --- |
+| `MCP_PUBLIC_URL` + `DISCORD_CLIENT_SECRET` | **OAuth 2.1.** Clients discover the server's authorization endpoints, register themselves, and send you to sign in with Discord and approve the client. Works with claude.ai connectors, Claude Code, Cursor and other OAuth-capable MCP clients. |
+| `MCP_AUTH_TOKEN` | Clients send `Authorization: Bearer <token>`. Can be combined with OAuth. |
+| neither | No authentication. The server logs a warning. Only acceptable if port 8085 is reachable by you alone. |
+
+### Setting up OAuth
+
+1. Put the server behind HTTPS, for example a reverse proxy (Caddy, nginx, Traefik) or a tunnel, and note its address, e.g. `https://mcp.example.com`. The server itself listens on plain HTTP port 8085.
+2. In the [Discord Developer Portal](https://discord.com/developers/applications), open the bot's application → **OAuth2**:
+   - copy the **Client Secret** into `DISCORD_CLIENT_SECRET`;
+   - under **Redirects**, add `https://mcp.example.com/oauth/discord/callback`.
+3. Set `MCP_PUBLIC_URL=https://mcp.example.com`, and either `DISCORD_GUILD_ID` (its owner may sign in) or `MCP_ALLOWED_USERS` with the Discord user IDs of everyone who may use the server (Discord → Settings → Advanced → Developer Mode, then right-click a user → Copy User ID).
+4. Keep `/app/data` (or `OAUTH_DATA_FILE`) on persistent storage, so clients stay signed in across restarts. Docker Compose does this with the `discord-mcp-data` volume.
+5. In your MCP client, add `https://mcp.example.com/mcp`. On first use the client opens a browser: sign in with Discord, check the client name, and click **Allow**.
+
+How it works:
+
+- The server is its own authorization server, following the MCP authorization spec: protected resource metadata (`/.well-known/oauth-protected-resource`), authorization server metadata (`/.well-known/oauth-authorization-server`), dynamic client registration (`/oauth/register`), the authorization code flow with mandatory PKCE (`/oauth/authorize`, `/oauth/token`) and token revocation (`/oauth/revoke`).
+- Discord sign-in only asks for the `identify` scope: the server learns who you are, nothing else.
+- Access tokens last 1 hour; refresh tokens 30 days and are rotated on every use. A reused refresh token or authorization code revokes everything issued from that sign-in.
+- Whether a user is allowed is checked again on every request: remove someone from `MCP_ALLOWED_USERS` and restart, and their tokens stop working.
+- Tokens and client secrets are stored only as SHA-256 hashes.
 
 ## Running
 
@@ -108,10 +144,16 @@ DISCORD_TOKEN=... discord-mcp
 
 ### Claude Code
 
-HTTP:
+HTTP with OAuth (Claude Code opens the browser to sign in):
 
 ```bash
-claude mcp add discord-mcp --transport http http://localhost:8085/mcp
+claude mcp add discord-mcp --transport http https://mcp.example.com/mcp
+```
+
+HTTP with `MCP_AUTH_TOKEN`:
+
+```bash
+claude mcp add discord-mcp --transport http https://mcp.example.com/mcp --header "Authorization: Bearer YOUR_MCP_AUTH_TOKEN"
 ```
 
 stdio:
@@ -155,17 +197,34 @@ stdio through Docker:
 }
 ```
 
-HTTP:
+HTTP (clients that support OAuth sign in on first use):
 
 ```json
 {
   "mcpServers": {
     "discord-mcp": {
-      "url": "http://localhost:8085/mcp"
+      "url": "https://mcp.example.com/mcp"
     }
   }
 }
 ```
+
+HTTP with `MCP_AUTH_TOKEN`:
+
+```json
+{
+  "mcpServers": {
+    "discord-mcp": {
+      "url": "https://mcp.example.com/mcp",
+      "headers": { "Authorization": "Bearer YOUR_MCP_AUTH_TOKEN" }
+    }
+  }
+}
+```
+
+### claude.ai
+
+With OAuth set up, add a custom connector with the URL `https://mcp.example.com/mcp`. claude.ai registers itself and sends you to sign in with Discord.
 
 ## Troubleshooting
 
@@ -173,6 +232,12 @@ Startup failures are printed to stderr, which MCP clients show in their logs:
 
 - **Discord rejected DISCORD_TOKEN**: the token is wrong, reset, or wrapped in quotes. Reset it in the Developer Portal and set it without quotes (an env file keeps quotes literally).
 - **A privileged gateway intent is not enabled**: enable **Server Members Intent** in the Developer Portal.
+
+Sign-in problems:
+
+- **Discord says the redirect URI is invalid**: add `<MCP_PUBLIC_URL>/oauth/discord/callback` exactly under OAuth2 → Redirects.
+- **"This Discord account is not allowed"**: add the user ID to `MCP_ALLOWED_USERS`, or sign in as the owner of `DISCORD_GUILD_ID`.
+- **"This sign-in link has expired or was opened in a different browser"**: start again from the MCP client; the whole sign-in must happen in one browser within 10 minutes.
 
 ## Tools
 

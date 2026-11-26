@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 
 	"github.com/sadewadee/discord-mcp-go/internal/config"
 	"github.com/sadewadee/discord-mcp-go/internal/gateway"
+	"github.com/sadewadee/discord-mcp-go/internal/oauth"
 	"github.com/sadewadee/discord-mcp-go/internal/server"
 	"github.com/sadewadee/discord-mcp-go/internal/tools"
 )
@@ -78,7 +80,13 @@ func run() int {
 
 	switch cfg.Transport {
 	case config.TransportHTTP:
-		err = server.RunHTTP(ctx, srv, config.Port, logger)
+		auth, aerr := httpAuth(cfg, session, logger)
+		if aerr != nil {
+			logger.Error("HTTP authentication setup failed", "error", aerr)
+			fmt.Fprintln(os.Stderr, "ERROR: "+aerr.Error())
+			return 1
+		}
+		err = server.RunHTTP(ctx, srv, config.Port, logger, auth)
 	default:
 		logger.Info("MCP transport: stdio. Each client session starts a separate server process.")
 		err = server.RunStdio(ctx, srv)
@@ -125,4 +133,75 @@ func newLogger(cfg config.Config) (*slog.Logger, func(), error) {
 		}
 	}
 	return logger, func() { _ = f.Close() }, nil
+}
+
+// staticAuth protects /mcp with MCP_AUTH_TOKEN only.
+type staticAuth struct{ token string }
+
+func (staticAuth) Register(*http.ServeMux) {}
+
+func (a staticAuth) Protect(h http.Handler) http.Handler { return oauth.StaticTokenOnly(a.token, h) }
+
+// httpAuth builds the authentication for the HTTP transport: OAuth with
+// Discord sign-in when MCP_PUBLIC_URL is set, a static bearer token when
+// only MCP_AUTH_TOKEN is set, or none (with a warning).
+func httpAuth(cfg config.Config, session *discordgo.Session, logger *slog.Logger) (server.Auth, error) {
+	switch {
+	case cfg.OAuthEnabled():
+		clientID := cfg.DiscordClientID
+		if clientID == "" && session.State.Application != nil {
+			clientID = session.State.Application.ID
+		}
+		if clientID == "" {
+			return nil, fmt.Errorf("cannot determine the Discord application ID; set DISCORD_CLIENT_ID")
+		}
+		o, err := oauth.New(oauth.Config{
+			PublicURL:           cfg.PublicURL,
+			DiscordClientID:     clientID,
+			DiscordClientSecret: cfg.DiscordClientSecret,
+			StaticToken:         cfg.AuthToken,
+			Allowed:             allowedUsers(cfg, session),
+			DataFile:            cfg.OAuthDataFile,
+			Logger:              logger.With("component", "oauth"),
+		})
+		if err != nil {
+			return nil, err
+		}
+		logger.Info("OAuth enabled", "issuer", cfg.PublicURL, "resource", o.Resource(),
+			"discord_redirect_uri", cfg.PublicURL+"/oauth/discord/callback",
+			"allowed_users", len(cfg.AllowedUsers), "guild_owner_allowed", cfg.DefaultGuildID != "",
+			"static_token", cfg.AuthToken != "")
+		return o, nil
+	case cfg.AuthToken != "":
+		logger.Info("HTTP endpoint protected by MCP_AUTH_TOKEN")
+		return staticAuth{cfg.AuthToken}, nil
+	default:
+		logger.Warn("HTTP endpoint has NO authentication: anyone who can reach port 8085 can use every tool. " +
+			"Set MCP_PUBLIC_URL and DISCORD_CLIENT_SECRET for OAuth, or MCP_AUTH_TOKEN, unless the port is only reachable by you.")
+		return nil, nil
+	}
+}
+
+// allowedUsers returns the sign-in check: a user listed in
+// MCP_ALLOWED_USERS, or the owner of DISCORD_GUILD_ID.
+func allowedUsers(cfg config.Config, session *discordgo.Session) func(string) bool {
+	listed := map[string]bool{}
+	for _, id := range cfg.AllowedUsers {
+		listed[id] = true
+	}
+	return func(userID string) bool {
+		if listed[userID] {
+			return true
+		}
+		if cfg.DefaultGuildID == "" {
+			return false
+		}
+		g, err := session.State.Guild(cfg.DefaultGuildID)
+		if err != nil || g == nil {
+			return false
+		}
+		session.State.RLock()
+		defer session.State.RUnlock()
+		return g.OwnerID == userID
+	}
 }

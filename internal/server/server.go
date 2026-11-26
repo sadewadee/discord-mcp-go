@@ -41,11 +41,31 @@ func RunStdio(ctx context.Context, s *mcp.Server) error {
 	return s.Run(ctx, &mcp.StdioTransport{})
 }
 
+// Auth protects the MCP endpoint. Register adds any endpoints it needs
+// (OAuth metadata, authorization, token); Protect wraps the MCP handler.
+type Auth interface {
+	Register(mux *http.ServeMux)
+	Protect(h http.Handler) http.Handler
+}
+
 // Handler returns the HTTP handler: streamable MCP at /mcp and a health check
-// at /health that answers {"status":"UP"}.
-func Handler(s *mcp.Server, log *slog.Logger) http.Handler {
+// at /health that answers {"status":"UP"}. With a non-nil auth, /mcp
+// requires a bearer token and the auth endpoints are added.
+func Handler(s *mcp.Server, log *slog.Logger, auth Auth) http.Handler {
 	mux := http.NewServeMux()
-	mcpHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, &mcp.StreamableHTTPOptions{Logger: log})
+	opts := &mcp.StreamableHTTPOptions{Logger: log}
+	var mcpHandler http.Handler
+	if auth != nil {
+		// DNS rebinding protection rejects requests that reach a loopback
+		// address with another Host header, which is what a reverse proxy on
+		// the same machine sends. With authentication in place a rebinding
+		// page has no token to send, so the protection is not needed.
+		opts.DisableLocalhostProtection = true
+		auth.Register(mux)
+		mcpHandler = auth.Protect(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, opts))
+	} else {
+		mcpHandler = mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return s }, opts)
+	}
 	mux.Handle(MCPPath, mcpHandler)
 	mux.HandleFunc(HealthPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -59,10 +79,10 @@ func Handler(s *mcp.Server, log *slog.Logger) http.Handler {
 }
 
 // RunHTTP serves Handler on port until ctx ends, then shuts down gracefully.
-func RunHTTP(ctx context.Context, s *mcp.Server, port int, log *slog.Logger) error {
+func RunHTTP(ctx context.Context, s *mcp.Server, port int, log *slog.Logger, auth Auth) error {
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", port),
-		Handler:           Handler(s, log),
+		Handler:           Handler(s, log, auth),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	errc := make(chan error, 1)

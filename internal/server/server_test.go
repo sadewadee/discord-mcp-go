@@ -33,7 +33,7 @@ func (e textErr) Error() string { return string(e) }
 const errNoText = textErr("text cannot be null")
 
 func TestHealth(t *testing.T) {
-	srv := httptest.NewServer(Handler(New(testTools(), nil), nil))
+	srv := httptest.NewServer(Handler(New(testTools(), nil), nil, nil))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + HealthPath)
@@ -48,7 +48,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestStreamableHTTP(t *testing.T) {
-	srv := httptest.NewServer(Handler(New(testTools(), nil), nil))
+	srv := httptest.NewServer(Handler(New(testTools(), nil), nil, nil))
 	defer srv.Close()
 
 	ctx := context.Background()

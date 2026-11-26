@@ -24,7 +24,7 @@ LABEL org.opencontainers.image.title="discord-mcp-go" \
 # ca-certificates for TLS to Discord; wget (busybox) is used by the compose health check.
 RUN apk add --no-cache ca-certificates \
     && addgroup -S app && adduser -S -G app app \
-    && mkdir -p /app/logs && chown -R app:app /app
+    && mkdir -p /app/logs /app/data && chown -R app:app /app
 
 WORKDIR /app
 COPY --from=build /out/discord-mcp /usr/local/bin/discord-mcp
@@ -34,7 +34,11 @@ COPY --from=build /out/discord-mcp /usr/local/bin/discord-mcp
 # compose). MCP_TRANSPORT=stdio|http overrides it.
 ENV DISCORD_TOKEN="" \
     DISCORD_GUILD_ID="" \
-    LOG_FILE="/app/logs/discord-mcp-server.log"
+    LOG_FILE="/app/logs/discord-mcp-server.log" \
+    OAUTH_DATA_FILE="/app/data/oauth.json"
+
+# OAuth clients and tokens; mount a volume here so sign-ins survive restarts.
+VOLUME ["/app/data"]
 
 # Run as an unprivileged user.
 USER app
