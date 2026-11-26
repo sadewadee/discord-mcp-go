@@ -5,7 +5,7 @@ It lets AI assistants such as Claude manage a Discord server through a bot accou
 
 - Single static binary, no runtime dependencies
 - Two transports: **stdio** (default) and **streamable HTTP** at `/mcp`
-- 82 tools, all with string parameters and formatted text results
+- 84 tools, all with string parameters and formatted text results
 
 ## Transport selection
 
@@ -281,7 +281,7 @@ All parameters are strings; numeric values such as `count` are passed as text an
 
 ### Messages
 
-- `send_message`: Send a message to a specific channel
+- `send_message`: Send a message to a specific channel. Optional `replyToMessageId` sends it as a reply to that message without pinging its author
 - `edit_message`: Edit a message from a specific channel
 - `delete_message`: Delete a message from a specific channel
 - `read_messages`: Read message history from a specific channel, optionally paginated with before/after/around
@@ -291,6 +291,7 @@ All parameters are strings; numeric values such as `count` are passed as text an
 - `get_attachment`: Get attachment metadata (filename, size, content type, URLs) from a specific message. Returns info only, does not download files.
 - `get_message`: Get a single message by ID, in the same format as read_messages. If the message is a reply, the message it replies to is included
 - `get_message_replies`: Find replies to a message by scanning the messages posted after it (up to maxMessages, default 500, max 1000). Discord has no replies lookup, so replies outside the scanned window are not found
+- `wait_for_messages`: Wait until a new message is posted in a channel, thread or forum (any of its posts), then return it and anything else that arrives within half a second, oldest first, in the `read_messages` format. `after` returns already existing newer messages at once (not for forum channels); `timeoutSeconds` 1–50, default 25. Messages sent through this bot are included, so agents posting through the same bot can wait for each other. On timeout the result is `No new messages (waited Ns)`, which is not an error
 
 ### Users and members
 
@@ -360,6 +361,7 @@ All parameters are strings; numeric values such as `count` are passed as text an
 - `list_threads`: List the threads of one channel (text, news, forum or media): active threads plus up to 100 recent archived public threads. A returned thread ID can be used as channelId in read_messages and send_message. Calling this also makes archived threads of the channel usable in get_thread_info and the message tools
 - `get_thread_info`: Get detailed information about a thread: parent channel, owner, archived/locked state, creation time, message and member counts. Archived threads are found only after list_threads has been called on their parent channel
 - `list_active_threads`: List all active threads in the server
+- `create_thread`: Create a thread in a text or announcement channel, from a message (`messageId`) or standalone, optionally `private` (text channels only); `autoArchiveMinutes` 60, 1440 (default), 4320 or 10080. The returned ID works as `channelId` in the message tools. Forum channels use `create_forum_post`
 
 ### Forums
 
