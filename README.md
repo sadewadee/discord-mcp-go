@@ -71,6 +71,35 @@ How it works:
 - Whether a user is allowed is checked again on every request: remove someone from `MCP_ALLOWED_USERS` and restart, and their tokens stop working.
 - Tokens and client secrets are stored only as SHA-256 hashes.
 
+## Auto-reply to mentions (optional)
+
+The server can also answer people: when someone mentions the bot in a guild channel, thread or forum post, it replies there with an answer from an LLM, taking the recent conversation into account. It is off unless `AUTOREPLY_ENABLED=true`, and it does not change the MCP tools.
+
+- **HTTP mode only.** In stdio mode every MCP client starts its own server process, so the listener would answer once per client; the server refuses to start with `AUTOREPLY_ENABLED=true` in stdio mode.
+- **Guild mentions only.** Direct messages are ignored, as are `@everyone`, `@here`, role mentions, bots, webhooks and the bot itself. A reply to one of the bot's messages counts when the replier leaves the mention on. With `DISCORD_GUILD_ID` set, only that server is answered.
+- **Text only.** The LLM gets the conversation and nothing else: no tools and no access to the MCP toolset. Channel text is untrusted input, so the worst a hostile message can cause is a bad text answer.
+- **Pings nobody.** Answers are sent with allowed mentions that only notify the person replied to; `@everyone` or a role mention in an answer arrives as plain text.
+- Any OpenAI-compatible endpoint works (`POST {base URL}/chat/completions`, non-streaming).
+- Answers are Discord replies, split into several messages beyond 2000 characters. If the LLM fails, times out or answers nothing (after one retry for HTTP 429/5xx), the bot adds a ⚠️ reaction to the question and posts nothing.
+- Logs hold channel and message IDs, durations and errors, never message content, the API key or the bot token.
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `AUTOREPLY_ENABLED` | `false` | `true` turns the listener on. |
+| `AUTOREPLY_LLM_BASE_URL` | | OpenAI-compatible base URL including `/v1`. Required when enabled. |
+| `AUTOREPLY_LLM_API_KEY` | | Bearer key for that endpoint. Required when enabled. |
+| `AUTOREPLY_LLM_MODEL` | | Model ID. Required when enabled. |
+| `AUTOREPLY_SYSTEM_PROMPT` | a short generic prompt | System prompt text. |
+| `AUTOREPLY_SYSTEM_PROMPT_FILE` | | File holding the system prompt; wins over `AUTOREPLY_SYSTEM_PROMPT`. |
+| `AUTOREPLY_CHANNEL_IDS` | all channels | Comma-separated channel IDs to answer in. Threads and forum posts match through their parent channel. |
+| `AUTOREPLY_CONTEXT_MESSAGES` | `15` | Earlier messages sent as context, 0 to 50. |
+| `AUTOREPLY_MAX_TOKENS` | `800` | `max_tokens` for each answer, 1 to 32000. |
+| `AUTOREPLY_TIMEOUT_SECONDS` | `60` | Deadline for one LLM call, 1 to 600. |
+| `AUTOREPLY_USER_COOLDOWN_SECONDS` | `10` | Minimum gap between two answers to the same user, 0 to 3600. Mentions inside it are ignored. |
+| `AUTOREPLY_MAX_CONCURRENT` | `4` | LLM calls in flight at once, 1 to 32. Further mentions wait up to 30 seconds for a slot. |
+
+**Message Content Intent.** Discord sends the text of a message that mentions the bot even without the privileged Message Content Intent, so mentions are always answered. The earlier messages used as context are different: without the intent they arrive empty ([Discord docs](https://docs.discord.com/developers/events/gateway#message-content-intent)). Enable **Message Content Intent** in the Developer Portal (Bot → Privileged Gateway Intents) so answers can use the conversation; the server logs a warning when context messages arrive empty. The server does not request the intent itself, so deployments without it keep working.
+
 ## Running
 
 ### Container image

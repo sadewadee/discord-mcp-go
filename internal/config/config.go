@@ -8,7 +8,9 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Transport selects how MCP clients talk to the server.
@@ -53,7 +55,29 @@ type Config struct {
 	// InsecureNoAuth allows HTTP without authentication (MCP_INSECURE_NO_AUTH=true),
 	// for example behind a proxy that authenticates on its own.
 	InsecureNoAuth bool
+
+	AutoReply AutoReply
 }
+
+// AutoReply configures the listener that answers mentions of the bot.
+type AutoReply struct {
+	Enabled         bool          // AUTOREPLY_ENABLED
+	BaseURL         string        // AUTOREPLY_LLM_BASE_URL
+	APIKey          string        // AUTOREPLY_LLM_API_KEY
+	Model           string        // AUTOREPLY_LLM_MODEL
+	SystemPrompt    string        // AUTOREPLY_SYSTEM_PROMPT or the content of AUTOREPLY_SYSTEM_PROMPT_FILE
+	ChannelIDs      []string      // AUTOREPLY_CHANNEL_IDS
+	ContextMessages int           // AUTOREPLY_CONTEXT_MESSAGES
+	MaxTokens       int           // AUTOREPLY_MAX_TOKENS
+	Timeout         time.Duration // AUTOREPLY_TIMEOUT_SECONDS
+	UserCooldown    time.Duration // AUTOREPLY_USER_COOLDOWN_SECONDS
+	MaxConcurrent   int           // AUTOREPLY_MAX_CONCURRENT
+}
+
+// DefaultAutoReplyPrompt is the system prompt used when none is configured.
+const DefaultAutoReplyPrompt = "You are a helpful assistant in a Discord server. Answer the last message briefly and clearly, " +
+	"in the language it was written in. Earlier messages are context; each user message starts with the author's name. " +
+	"If you do not know something, say so instead of guessing."
 
 // OAuthEnabled reports whether OAuth sign-in is configured.
 func (c Config) OAuthEnabled() bool { return c.PublicURL != "" }
@@ -92,7 +116,115 @@ func Load(getenv func(string) string, stdin fs.FileMode, stdinErr error) (Config
 	if err := requireHTTPAuth(cfg); err != nil {
 		return cfg, err
 	}
+	if err := loadAutoReply(&cfg, getenv, os.ReadFile); err != nil {
+		return cfg, err
+	}
 	return cfg, nil
+}
+
+// loadAutoReply reads the AUTOREPLY_* variables. With AUTOREPLY_ENABLED
+// unset or false the others are ignored.
+func loadAutoReply(cfg *Config, getenv func(string) string, readFile func(string) ([]byte, error)) error {
+	enabled, err := parseBool(getenv, "AUTOREPLY_ENABLED")
+	if err != nil || !enabled {
+		return err
+	}
+	a := AutoReply{
+		Enabled: true,
+		BaseURL: strings.TrimRight(strings.TrimSpace(getenv("AUTOREPLY_LLM_BASE_URL")), "/"),
+		APIKey:  strings.TrimSpace(getenv("AUTOREPLY_LLM_API_KEY")),
+		Model:   strings.TrimSpace(getenv("AUTOREPLY_LLM_MODEL")),
+	}
+	for _, req := range []struct{ name, value string }{
+		{"AUTOREPLY_LLM_BASE_URL", a.BaseURL},
+		{"AUTOREPLY_LLM_API_KEY", a.APIKey},
+		{"AUTOREPLY_LLM_MODEL", a.Model},
+	} {
+		if req.value == "" {
+			return fmt.Errorf("AUTOREPLY_ENABLED is true but %s is not set", req.name)
+		}
+	}
+	if u, err := url.Parse(a.BaseURL); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("AUTOREPLY_LLM_BASE_URL must be an http(s) URL including /v1, e.g. https://api.example.com/v1, got %q", a.BaseURL)
+	}
+	if cfg.Transport != TransportHTTP {
+		return fmt.Errorf("AUTOREPLY_ENABLED needs the HTTP transport, but this process uses stdio (%s).\n"+
+			"  In stdio mode every MCP client starts its own server process, so the listener would answer once per connected client.\n"+
+			"  Run the listener in the long-running HTTP server (for example the Docker container), or set AUTOREPLY_ENABLED=false here",
+			cfg.TransportReason)
+	}
+
+	a.SystemPrompt = DefaultAutoReplyPrompt
+	if p := strings.TrimSpace(getenv("AUTOREPLY_SYSTEM_PROMPT")); p != "" {
+		a.SystemPrompt = p
+	}
+	if f := strings.TrimSpace(getenv("AUTOREPLY_SYSTEM_PROMPT_FILE")); f != "" {
+		b, err := readFile(f)
+		if err != nil {
+			return fmt.Errorf("AUTOREPLY_SYSTEM_PROMPT_FILE cannot be read: %w", err)
+		}
+		if strings.TrimSpace(string(b)) == "" {
+			return fmt.Errorf("AUTOREPLY_SYSTEM_PROMPT_FILE %s is empty", f)
+		}
+		a.SystemPrompt = strings.TrimSpace(string(b))
+	}
+
+	for _, id := range strings.Split(getenv("AUTOREPLY_CHANNEL_IDS"), ",") {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		}
+		if !snowflakeRe.MatchString(id) {
+			return fmt.Errorf("AUTOREPLY_CHANNEL_IDS must be a comma-separated list of channel IDs, got %q", id)
+		}
+		a.ChannelIDs = append(a.ChannelIDs, id)
+	}
+
+	type intVar struct {
+		name          string
+		def, min, max int
+		dst           *int
+	}
+	var timeout, cooldown int
+	for _, n := range []intVar{
+		{"AUTOREPLY_CONTEXT_MESSAGES", 15, 0, 50, &a.ContextMessages},
+		{"AUTOREPLY_MAX_TOKENS", 800, 1, 32000, &a.MaxTokens},
+		{"AUTOREPLY_TIMEOUT_SECONDS", 60, 1, 600, &timeout},
+		{"AUTOREPLY_USER_COOLDOWN_SECONDS", 10, 0, 3600, &cooldown},
+		{"AUTOREPLY_MAX_CONCURRENT", 4, 1, 32, &a.MaxConcurrent},
+	} {
+		v, err := parseIntRange(getenv, n.name, n.def, n.min, n.max)
+		if err != nil {
+			return err
+		}
+		*n.dst = v
+	}
+	a.Timeout = time.Duration(timeout) * time.Second
+	a.UserCooldown = time.Duration(cooldown) * time.Second
+	cfg.AutoReply = a
+	return nil
+}
+
+func parseBool(getenv func(string) string, name string) (bool, error) {
+	switch v := strings.ToLower(strings.TrimSpace(getenv(name))); v {
+	case "", "false", "0", "no":
+		return false, nil
+	case "true", "1", "yes":
+		return true, nil
+	default:
+		return false, fmt.Errorf("%s must be true or false, got %q", name, v)
+	}
+}
+
+func parseIntRange(getenv func(string) string, name string, def, min, max int) (int, error) {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < min || n > max {
+		return 0, fmt.Errorf("%s must be a whole number from %d to %d, got %q", name, min, max, raw)
+	}
+	return n, nil
 }
 
 // requireHTTPAuth refuses to serve HTTP without authentication: the HTTP

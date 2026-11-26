@@ -20,6 +20,13 @@ services:
       MCP_AUTH_TOKEN: ${MCP_AUTH_TOKEN:-}
       # Without MCP_AUTH_TOKEN or OAuth the server refuses to start, unless this is true
       MCP_INSECURE_NO_AUTH: ${MCP_INSECURE_NO_AUTH:-false}
+      # Optional: answer guild mentions of the bot with an LLM (see README)
+      # AUTOREPLY_ENABLED: ${AUTOREPLY_ENABLED:-false}
+      # AUTOREPLY_LLM_BASE_URL: ${AUTOREPLY_LLM_BASE_URL}
+      # AUTOREPLY_LLM_API_KEY: ${AUTOREPLY_LLM_API_KEY}
+      # AUTOREPLY_LLM_MODEL: ${AUTOREPLY_LLM_MODEL}
+      # AUTOREPLY_SYSTEM_PROMPT: ${AUTOREPLY_SYSTEM_PROMPT:-}
+      # AUTOREPLY_CHANNEL_IDS: ${AUTOREPLY_CHANNEL_IDS:-}
     volumes:
       - discord-mcp-data:/app/data
     healthcheck:

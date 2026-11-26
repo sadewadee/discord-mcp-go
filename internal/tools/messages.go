@@ -66,6 +66,14 @@ func (t *Toolset) contentDisplay(m *discordgo.Message, guildID string) string {
 	return content
 }
 
+// ContentDisplay renders m's content with mentions shown as names (users as
+// "@name", roles as "@role", channels as "#channel", custom emoji as
+// ":name:"), using the gateway state cache. guildID may be empty outside a
+// guild.
+func (t *Toolset) ContentDisplay(m *discordgo.Message, guildID string) string {
+	return t.contentDisplay(m, guildID)
+}
+
 // repliedToID returns the ID of the message m replies to, or "" when m is not
 // a reply. Forwards, thread starters and crossposts also carry a message
 // reference but are not replies.
