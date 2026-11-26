@@ -19,6 +19,7 @@ internal/gateway/              connects to Discord, waits for guilds and member 
 internal/server/               MCP server, stdio and streamable HTTP transports, /health
 internal/oauth/                OAuth 2.1 authorization server (Discord sign-in) and bearer token check for /mcp
 internal/autoreply/            optional listener that answers guild mentions of the bot with an LLM (OpenAI-compatible)
+skills/discord-listen/         Claude Code skill: background listener on wait_for_messages (Python, stdlib only)
 internal/tools/
   registry.go                  Tool/Param types, argument parsing, error text, MCP registration
   lookup.go                    guild/channel/role/member lookups in the state cache, default guild
@@ -82,6 +83,8 @@ Runtime secrets live in `.env`, which is gitignored. Never commit a token.
 - **Message tools accept text, announcement and thread channel IDs** (`Toolset.messageChannel`). `send_message` takes an optional `replyToMessageId`: the message becomes a Discord reply that does not ping the replied-to author (mentions in the text are parsed as before; an unknown ID is Discord's error). Without it the request is exactly the plain send.
 - **`wait_for_messages` and the hub.** `tools.New` registers one `MessageCreate` handler that feeds `hub.go`; waiters subscribe by channel ID, and a message also reaches waiters on its thread's parent, so waiting on a forum channel covers all of its posts. The tool subscribes before its REST check of `after`, so nothing posted in between is missed. Messages sent through this bot are delivered too (agents share the bot identity). Results use the `read_messages` line format, oldest first, grouped by post for a forum; a burst is collected for 500 ms after the first message. A timeout is a normal result, `No new messages (waited Ns)`, not an error. Waiters are capped at 64; every exit path (delivery, timeout, cancellation, `Toolset.Close` at shutdown) unsubscribes. The gateway intents are unchanged: guild messages are non-privileged, and content of other users' messages is empty unless Message Content Intent is enabled in the Developer Portal, which the tool tolerates.
 - **`create_thread`** creates public, private (text channels only, not from a message) or announcement threads in text and announcement channels and refuses forum channels, pointing to `create_forum_post`. The new thread is added to the state cache, so the message tools accept its ID at once.
+
+- **Skill parser.** `skills/discord-listen/scripts/discord_listen.py` parses the text of `wait_for_messages` and `read_messages`: the `**Received N new messages:**` block, the message line from `Toolset.formatMessage` (`- (ID: ...) **[name]** (Author ID: ...) `timestamp`: ```content```, with an optional `[Reply to: ...]`), the `**Retrieved N messages:**` header, and the `No new messages` text. Change any of these formats only together with that script and its tests.
 
 When one of these changes, update this section in the same change.
 
