@@ -18,6 +18,7 @@ internal/config/               environment variables
 internal/gateway/              connects to Discord, waits for guilds and member chunking, startup error messages
 internal/server/               MCP server, stdio and streamable HTTP transports, /health
 internal/oauth/                OAuth 2.1 authorization server (Discord sign-in) and bearer token check for /mcp
+internal/autoreply/            optional listener that answers guild mentions of the bot with an LLM (OpenAI-compatible)
 internal/tools/
   registry.go                  Tool/Param types, argument parsing, error text, MCP registration
   lookup.go                    guild/channel/role/member lookups in the state cache, default guild
@@ -60,6 +61,7 @@ Container builds and `docker compose up` run on a remote server, never on the de
 | `OAUTH_DATA_FILE` | no | OAuth clients and token hashes, default `./data/oauth.json` (`/app/data/oauth.json` in the image). |
 | `MCP_AUTH_TOKEN` | for HTTP, unless OAuth | Fixed bearer token (min. 32 characters), with or without OAuth. HTTP without `MCP_AUTH_TOKEN` or OAuth refuses to start. |
 | `MCP_INSECURE_NO_AUTH` | no | `true` allows HTTP without authentication (behind an authenticating proxy). |
+| `AUTOREPLY_ENABLED` | no | `true` turns on the mention listener (HTTP mode only). Needs `AUTOREPLY_LLM_BASE_URL`, `AUTOREPLY_LLM_API_KEY`, `AUTOREPLY_LLM_MODEL`; the other `AUTOREPLY_*` variables are listed in README. |
 
 Runtime secrets live in `.env`, which is gitignored. Never commit a token.
 
@@ -69,6 +71,7 @@ Runtime secrets live in `.env`, which is gitignored. Never commit a token.
 - **HTTP authentication.** With `MCP_PUBLIC_URL`, `/mcp` requires a bearer token and answers 401 with `WWW-Authenticate: Bearer resource_metadata="<MCP_PUBLIC_URL>/.well-known/oauth-protected-resource/mcp"`. The server is its own authorization server (RFC 8414 metadata, RFC 7591 registration, authorization code + S256 PKCE, refresh rotation with reuse detection (30 s retry grace), RFC 7009 revocation, RFC 9207 `iss`); users sign in with Discord (`identify` scope) and must pass the allow check, which is repeated on every request. A consent page names the client before a code is issued. Sign-in state lives in an HMAC-signed per-flow cookie, invalid authorize requests get an error page (never a redirect), and registered clients holding live tokens are never evicted, so anonymous registration or authorize floods cannot sign users out or block sign-in. `MCP_AUTH_TOKEN` alone protects `/mcp` without OAuth. With neither, the server refuses to start in HTTP mode (`config.requireHTTPAuth`, checked before connecting to Discord); only `MCP_INSECURE_NO_AUTH=true` serves HTTP unauthenticated, with a warning. `/health` is always open. stdio never uses authentication.
 - **stdout is the MCP channel in stdio mode.** Nothing else may be written to it. Logs go to `LOG_FILE` (and also stdout in HTTP mode); startup failures go to stderr, where MCP clients pick them up. discordgo's logger and the standard `log` package are routed to the same place.
 - **Actionable startup errors.** A rejected token (close code 4004 or HTTP 401) or a missing privileged intent (close code 4014) produces a specific message with the fix (`gateway.StartupFailure`).
+- **Auto-reply listener** (`internal/autoreply`, off unless `AUTOREPLY_ENABLED=true`). Answers only guild messages from humans that mention the bot itself (not DMs, `@everyone`, `@here` or roles), optionally only in `DISCORD_GUILD_ID` and `AUTOREPLY_CHANNEL_IDS` (threads through their parent). Runs in HTTP mode only; config refuses it under stdio, where each client starts its own process. The LLM gets text only, never tools or the MCP toolset. Every outgoing message sets allowed mentions with an empty `parse` list, so only the replied-to author is notified. Failures add a ⚠️ reaction and post nothing. Logs never contain message content, the LLM key or the bot token. It does not change the gateway intents or any tool.
 - **Gateway intents.** All non-privileged intents plus `GUILD_MEMBERS`. Members of every guild are chunked into the state cache at startup; member lookup and search tools rely on that cache.
 - **Tool names and parameters.** Tool names are `snake_case`; parameter names are `camelCase` (`channelId`, `guildId`, `messageId`). All parameters are strings in the schema, including numeric ones such as `count`, which are parsed and range-checked inside the tool. Numbers and booleans sent by a client are accepted and converted to text.
 - **Default guild.** Tools resolve `guildId` through `Toolset.guild`: an empty argument falls back to `DISCORD_GUILD_ID`, and a tool fails with a clear error if neither is set.

@@ -17,9 +17,11 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/sadewadee/discord-mcp-go/internal/autoreply"
 	"github.com/sadewadee/discord-mcp-go/internal/config"
 	"github.com/sadewadee/discord-mcp-go/internal/gateway"
 	"github.com/sadewadee/discord-mcp-go/internal/oauth"
@@ -77,6 +79,15 @@ func run() int {
 	all := toolset.All()
 	srv := server.New(all, logger)
 	logger.Info("tools registered", "count", len(all))
+
+	listener := startAutoReply(cfg, session, toolset, logger)
+	if listener != nil {
+		defer func() {
+			if !listener.Shutdown(10 * time.Second) {
+				logger.Warn("auto-reply answers still in progress at shutdown were abandoned")
+			}
+		}()
+	}
 
 	switch cfg.Transport {
 	case config.TransportHTTP:
@@ -204,4 +215,52 @@ func allowedUsers(cfg config.Config, session *discordgo.Session) func(string) bo
 		defer session.State.RUnlock()
 		return g.OwnerID == userID
 	}
+}
+
+// startAutoReply registers the listener that answers mentions of the bot,
+// when AUTOREPLY_ENABLED is set. Config validation already guarantees the
+// HTTP transport and complete LLM settings.
+func startAutoReply(cfg config.Config, session *discordgo.Session, toolset *tools.Toolset, logger *slog.Logger) *autoreply.Listener {
+	ar := cfg.AutoReply
+	if !ar.Enabled {
+		logger.Info("auto-reply disabled")
+		return nil
+	}
+	channels := map[string]bool{}
+	for _, id := range ar.ChannelIDs {
+		channels[id] = true
+	}
+	llm := autoreply.NewOpenAI(autoreply.OpenAIConfig{
+		BaseURL:   ar.BaseURL,
+		APIKey:    ar.APIKey,
+		Model:     ar.Model,
+		MaxTokens: ar.MaxTokens,
+		Timeout:   ar.Timeout,
+	})
+	botID := func() string {
+		session.State.RLock()
+		defer session.State.RUnlock()
+		if session.State.User == nil {
+			return ""
+		}
+		return session.State.User.ID
+	}
+	l := autoreply.New(autoreply.Settings{
+		GuildID:         cfg.DefaultGuildID,
+		ChannelIDs:      channels,
+		SystemPrompt:    ar.SystemPrompt,
+		ContextMessages: ar.ContextMessages,
+		UserCooldown:    ar.UserCooldown,
+		MaxConcurrent:   ar.MaxConcurrent,
+	}, autoreply.SessionDiscord{S: session}, llm, toolset.ContentDisplay, botID, logger.With("component", "autoreply"))
+	session.AddHandler(l.OnMessageCreate)
+
+	channelScope := "all channels"
+	if len(channels) > 0 {
+		channelScope = fmt.Sprintf("%d channels", len(channels))
+	}
+	logger.Info("auto-reply enabled", "model", ar.Model, "channels", channelScope,
+		"context_messages", ar.ContextMessages, "max_concurrent", ar.MaxConcurrent,
+		"cooldown", ar.UserCooldown.String(), "guild", cfg.DefaultGuildID)
+	return l
 }
